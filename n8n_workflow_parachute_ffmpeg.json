@@ -1,0 +1,302 @@
+{
+  "name": "Montage Parachute FFmpeg",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * 1"
+            }
+          ]
+        }
+      },
+      "id": "trigger-cron",
+      "name": "Déclencheur (Lundi 8h)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "montage-parachute",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "trigger-webhook",
+      "name": "Déclencheur Webhook (Manuel / N8N)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [240, 480],
+      "webhookId": "parachute-montage-webhook"
+    },
+    {
+      "parameters": {
+        "operation": "list",
+        "folderId": {
+          "__rl": true,
+          "value": "={{$vars.DRIVE_FOLDER_SOURCES_ID}}",
+          "mode": "id"
+        },
+        "filter": {
+          "q": "mimeType contains 'video/'"
+        },
+        "options": {
+          "fields": "files(id, name, createdTime)"
+        }
+      },
+      "id": "drive-list",
+      "name": "Lister vidéos Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [480, 380],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "download",
+        "fileId": {
+          "__rl": true,
+          "value": "={{$json.id}}",
+          "mode": "id"
+        },
+        "binaryPropertyName": "video",
+        "options": {}
+      },
+      "id": "drive-download",
+      "name": "Télécharger chaque vidéo",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [700, 380],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{$vars.API_MONTAGE_URL}}/montage",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$vars.API_KEY}}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": []
+        },
+        "jsonBody": "={\n  \"fichiers\": {{ JSON.stringify($items('Lister vidéos Drive').map(i => i.json.name)) }},\n  \"nom_sortie\": \"parachute_{{ $now.toFormat('yyyyMMdd') }}.mp4\",\n  \"transitions\": [\"fade\", \"circleopen\", \"wipeleft\", \"radial\", \"dissolve\"],\n  \"attendre\": true,\n  \"config\": {\n    \"encodeur\": \"libx264\",\n    \"crf\": 23,\n    \"resolution\": \"1920x1080\",\n    \"fps\": 30,\n    \"duree_clip\": 6,\n    \"duree_transition\": 1.2,\n    \"preset\": \"fast\"\n  }\n}",
+        "options": {
+          "timeout": 600000
+        }
+      },
+      "id": "appel-api",
+      "name": "Appel API Montage",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [920, 380],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-erreur",
+              "leftValue": "={{$json.erreur}}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "check-erreur",
+      "name": "Vérifier erreur",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1140, 380]
+    },
+    {
+      "parameters": {
+        "operation": "upload",
+        "name": "=parachute_{{ $now.toFormat('yyyyMMdd') }}.mp4",
+        "folderId": {
+          "__rl": true,
+          "value": "={{$vars.DRIVE_FOLDER_OUTPUT_ID}}",
+          "mode": "id"
+        },
+        "binaryData": false,
+        "fileContent": "={{$('Appel API Montage').item.json.fichier}}",
+        "options": {
+          "mimeType": "video/mp4"
+        }
+      },
+      "id": "drive-upload",
+      "name": "Uploader montage Drive",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [1360, 260],
+      "credentials": {
+        "googleDriveOAuth2Api": {
+          "id": "GOOGLE_DRIVE_CREDENTIAL_ID",
+          "name": "Google Drive"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{$vars.EMAIL_SUCCES}}",
+        "subject": "=✅ Montage parachute prêt — {{ $now.toFormat('dd/MM/yyyy') }}",
+        "message": "=Bonjour,\n\nLe montage vidéo parachutisme du {{ $now.toFormat('dd/MM/yyyy') }} a été créé avec succès.\n\nFichier : parachute_{{ $now.toFormat('yyyyMMdd') }}.mp4\nDossier Drive : {{$vars.DRIVE_FOLDER_OUTPUT_ID}}\n\n-- Workflow N8N automatique",
+        "options": {}
+      },
+      "id": "email-succes",
+      "name": "Email succès",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1580, 260],
+      "credentials": {
+        "smtp": {
+          "id": "SMTP_CREDENTIAL_ID",
+          "name": "SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{$vars.EMAIL_ERREUR}}",
+        "subject": "=❌ ERREUR montage parachute — {{ $now.toFormat('dd/MM/yyyy HH:mm') }}",
+        "message": "=ALERTE — Échec du montage vidéo parachutisme.\n\nDate : {{ $now.toFormat('dd/MM/yyyy HH:mm:ss') }}\n\nDétail de l'erreur :\n{{ $('Appel API Montage').item.json.erreur || $('Appel API Montage').item.json.message || 'Erreur inconnue' }}\n\nCode HTTP : {{ $('Appel API Montage').item.json.statusCode || 'N/A' }}\n\nAction requise : vérifier les logs du serveur Flask et l'état de FFmpeg.\nURL API : {{$vars.API_MONTAGE_URL}}\n\n-- Workflow N8N automatique",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "email-erreur",
+      "name": "Email erreur (alerte)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1360, 500],
+      "credentials": {
+        "smtp": {
+          "id": "SMTP_CREDENTIAL_ID",
+          "name": "SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"statut\": \"ok\", \"message\": \"Montage créé et uploadé\", \"date\": \"{{ $now.toISO() }}\"}",
+        "options": {}
+      },
+      "id": "reponse-webhook-ok",
+      "name": "Réponse Webhook OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1800, 260]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"statut\": \"erreur\", \"detail\": \"{{ $('Appel API Montage').item.json.erreur }}\", \"date\": \"{{ $now.toISO() }}\"}",
+        "responseCode": 500,
+        "options": {}
+      },
+      "id": "reponse-webhook-erreur",
+      "name": "Réponse Webhook Erreur",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1580, 500]
+    }
+  ],
+  "connections": {
+    "Déclencheur (Lundi 8h)": {
+      "main": [
+        [{ "node": "Lister vidéos Drive", "type": "main", "index": 0 }]
+      ]
+    },
+    "Déclencheur Webhook (Manuel / N8N)": {
+      "main": [
+        [{ "node": "Lister vidéos Drive", "type": "main", "index": 0 }]
+      ]
+    },
+    "Lister vidéos Drive": {
+      "main": [
+        [{ "node": "Télécharger chaque vidéo", "type": "main", "index": 0 }]
+      ]
+    },
+    "Télécharger chaque vidéo": {
+      "main": [
+        [{ "node": "Appel API Montage", "type": "main", "index": 0 }]
+      ]
+    },
+    "Appel API Montage": {
+      "main": [
+        [{ "node": "Vérifier erreur", "type": "main", "index": 0 }]
+      ]
+    },
+    "Vérifier erreur": {
+      "main": [
+        [{ "node": "Uploader montage Drive", "type": "main", "index": 0 }],
+        [{ "node": "Email erreur (alerte)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Uploader montage Drive": {
+      "main": [
+        [{ "node": "Email succès", "type": "main", "index": 0 }]
+      ]
+    },
+    "Email succès": {
+      "main": [
+        [{ "node": "Réponse Webhook OK", "type": "main", "index": 0 }]
+      ]
+    },
+    "Email erreur (alerte)": {
+      "main": [
+        [{ "node": "Réponse Webhook Erreur", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["parachute", "ffmpeg", "montage", "video"],
+  "triggerCount": 2,
+  "updatedAt": "2026-04-07T00:00:00.000Z",
+  "versionId": "1"
+}
