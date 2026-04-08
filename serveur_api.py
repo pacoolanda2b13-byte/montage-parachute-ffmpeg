@@ -155,8 +155,6 @@ def creer_montage_route():
     nom_sortie = data.get("nom_sortie") or f"montage_parachute_{date_str}.mp4"
     if not nom_sortie.endswith(".mp4"):
         nom_sortie += ".mp4"
-    chemin_sortie = os.path.join(DOSSIER_SORTIE, nom_sortie)
-
     transitions = data.get("transitions") or None
     cfg = data.get("config") or {}
     cfg["dossier_sortie"] = DOSSIER_SORTIE
@@ -169,7 +167,7 @@ def creer_montage_route():
 
     def executer():
         try:
-            chemin_final = creer_montage(fichiers_video, chemin_sortie, transitions, cfg)
+            chemin_final = creer_montage(fichiers_video, nom_sortie, transitions, cfg)
             jobs[job_id]["statut"] = "termine"
             jobs[job_id]["fichier"] = chemin_final
         except Exception as e:

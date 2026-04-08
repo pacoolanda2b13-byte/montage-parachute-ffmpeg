@@ -118,11 +118,12 @@ def preparer_clip(entree: str, index: int, dossier_tmp: str, cfg: dict) -> str:
     """
     sortie = os.path.join(dossier_tmp, f"clip_{index:03d}.mp4")
     resolution = cfg.get("resolution") or CONFIG["resolution"]
+    w, h = resolution.split("x")
     fps = cfg.get("fps", CONFIG["fps"])
     duree = cfg.get("duree_clip", CONFIG["duree_clip"])
 
-    vf_filters = [f"scale={resolution}:force_original_aspect_ratio=decrease",
-                  f"pad={resolution}:(ow-iw)/2:(oh-ih)/2",
+    vf_filters = [f"scale={w}:{h}:force_original_aspect_ratio=decrease",
+                  f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
                   f"fps={fps}"]
     vf = ",".join(vf_filters)
 
