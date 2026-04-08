@@ -12,15 +12,21 @@ Dépendances : flask (pip install flask) + FFmpeg installé sur le système.
 
 import os
 import uuid
+import glob
 import threading
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from flask import Flask, request, jsonify, send_file
+from werkzeug.utils import secure_filename
 
 from montage_parachute_ffmpeg import creer_montage, TRANSITIONS, verifier_ffmpeg
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB max upload
 
 # Dossier où les vidéos sources sont attendues
 DOSSIER_SOURCES = os.environ.get("DOSSIER_SOURCES", "./sources")
@@ -225,6 +231,46 @@ def telecharger(nom_fichier):
     if not os.path.exists(chemin):
         return jsonify({"erreur": "Fichier introuvable"}), 404
     return send_file(chemin, as_attachment=True)
+
+
+# ─────────────────────────────────────────────
+#  POST /upload
+# ─────────────────────────────────────────────
+@app.route("/upload", methods=["POST"])
+def upload_fichier():
+    """Upload un fichier vidéo dans le dossier sources."""
+    err = verif_api_key()
+    if err:
+        return err
+
+    if "fichier" not in request.files:
+        return jsonify({"erreur": "Aucun fichier dans la requête (champ 'fichier')"}), 400
+
+    fichier = request.files["fichier"]
+    if fichier.filename == "":
+        return jsonify({"erreur": "Nom de fichier vide"}), 400
+
+    nom = secure_filename(fichier.filename)
+    chemin = os.path.join(DOSSIER_SOURCES, nom)
+    fichier.save(chemin)
+
+    return jsonify({"statut": "ok", "fichier": nom, "chemin": chemin}), 200
+
+
+# ─────────────────────────────────────────────
+#  POST /nettoyer
+# ─────────────────────────────────────────────
+@app.route("/nettoyer", methods=["POST"])
+def nettoyer_sources():
+    """Supprime tous les fichiers du dossier sources."""
+    err = verif_api_key()
+    if err:
+        return err
+
+    fichiers = glob.glob(os.path.join(DOSSIER_SOURCES, "*"))
+    for f in fichiers:
+        os.remove(f)
+    return jsonify({"statut": "ok", "supprimes": len(fichiers)}), 200
 
 
 # ─────────────────────────────────────────────
