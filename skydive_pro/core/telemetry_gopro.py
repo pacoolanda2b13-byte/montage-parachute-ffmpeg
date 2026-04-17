@@ -2,32 +2,22 @@
 telemetry_gopro.py — Extraction de télémétrie GoPro (format GPMF)
 
 Les GoPro Hero 5+ embarquent un flux "GPMF" (GoPro Metadata Format) dans
-leurs vidéos MP4. Ce flux contient :
-    - GPS (latitude, longitude, altitude)
-    - Accéléromètre (3 axes, 200 Hz)
-    - Gyroscope (3 axes)
-    - Vitesse GPS
-    - Température
-    - ...
+leurs vidéos MP4. Ce module :
 
-Ce module :
     1. Détecte la présence d'un flux GPMF via ffprobe
-    2. L'extrait avec ffmpeg
-    3. Le parse avec une implémentation minimale (pas de dépendance externe)
-    4. Détecte les phases clés du saut :
-        - Décollage (altitude augmente)
-        - Sortie d'avion (accélération verticale brutale)
-        - Chute libre (accélération totale ≈ 1G mais en chute)
-        - Ouverture parachute (décélération nette)
-        - Sous voile (descente lente)
-        - Atterrissage (vitesse → 0)
+    2. L'extrait avec ffmpeg (-codec copy -f data)
+    3. Le parse récursivement (KLV avec conteneurs imbriqués)
+    4. Décode GPS5 (lat/lon/altitude/vitesse) et ACCL (3 axes)
+    5. Détecte les phases d'un saut parachute
+
+Références :
+    https://github.com/gopro/gpmf-parser
+    https://gopro.github.io/gpmf-parser/
 
 Usage :
     from core.telemetry_gopro import extract_telemetry, analyze_skydive
-
-    telemetry = extract_telemetry("sources/saut.mp4")
-    phases = analyze_skydive(telemetry)
-    print(phases.stats)
+    samples = extract_telemetry("sources/saut.mp4")
+    print(analyze_skydive(samples).to_dict())
 """
 
 from __future__ import annotations
@@ -37,29 +27,28 @@ import shutil
 import struct
 import subprocess
 import tempfile
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
 
-# ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════
 #  Modèles de données
-# ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════
 @dataclass
 class TelemetrySample:
-    """Un échantillon de télémétrie à un instant t."""
     time_s: float
     altitude_m: Optional[float] = None
-    speed_mps: Optional[float] = None     # vitesse GPS en m/s
-    accel_g: Optional[float] = None       # norme accéléromètre en G
-    vertical_speed_mps: Optional[float] = None  # d(altitude)/dt
+    speed_mps: Optional[float] = None
+    speed_3d_mps: Optional[float] = None
+    accel_g: Optional[float] = None
+    vertical_speed_mps: Optional[float] = None
     lat: Optional[float] = None
     lon: Optional[float] = None
 
 
 @dataclass
 class PhaseInterval:
-    """Un intervalle temporel correspondant à une phase du saut."""
     nom: str
     start_s: float
     end_s: float
@@ -71,9 +60,9 @@ class PhaseInterval:
 
 @dataclass
 class SkydiveAnalysis:
-    """Résultat complet de l'analyse d'un saut."""
     duree_totale_s: float
     altitude_max_m: Optional[float]
+    altitude_min_m: Optional[float]
     vitesse_max_kmh: Optional[float]
     duree_chute_libre_s: Optional[float]
     phases: list[PhaseInterval] = field(default_factory=list)
@@ -82,8 +71,9 @@ class SkydiveAnalysis:
 
     def to_dict(self) -> dict:
         return {
-            "duree_totale_s": self.duree_totale_s,
+            "duree_totale_s": round(self.duree_totale_s, 2),
             "altitude_max_m": self.altitude_max_m,
+            "altitude_min_m": self.altitude_min_m,
             "vitesse_max_kmh": self.vitesse_max_kmh,
             "duree_chute_libre_s": self.duree_chute_libre_s,
             "telemetry_disponible": self.telemetry_disponible,
@@ -92,31 +82,25 @@ class SkydiveAnalysis:
         }
 
 
-# ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════
 #  Détection & extraction du flux GPMF
-# ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════
 def _find_ffmpeg() -> tuple[str, str]:
-    ff = shutil.which("ffmpeg") or "ffmpeg"
-    fp = shutil.which("ffprobe") or "ffprobe"
-    return ff, fp
+    return (shutil.which("ffmpeg") or "ffmpeg",
+            shutil.which("ffprobe") or "ffprobe")
 
 
 def has_gpmf_stream(video_path: str | Path) -> Optional[int]:
-    """Retourne l'index du flux GPMF s'il existe, sinon None."""
+    """Retourne l'index du flux GPMF ou None s'il n'existe pas."""
     _, ffprobe = _find_ffmpeg()
-    cmd = [
-        ffprobe, "-v", "error",
-        "-print_format", "json",
-        "-show_streams",
-        str(video_path),
-    ]
+    cmd = [ffprobe, "-v", "error", "-print_format", "json",
+           "-show_streams", str(video_path)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
 
-    data = json.loads(result.stdout)
-    for stream in data.get("streams", []):
+    for stream in json.loads(result.stdout).get("streams", []):
         codec_tag = stream.get("codec_tag_string", "")
         handler = stream.get("tags", {}).get("handler_name", "")
         if codec_tag == "gpmd" or "GoPro MET" in handler:
@@ -125,186 +109,278 @@ def has_gpmf_stream(video_path: str | Path) -> Optional[int]:
 
 
 def extract_gpmf_bytes(video_path: str | Path, stream_index: int) -> bytes:
-    """Extrait le flux GPMF brut au format bytes."""
+    """Extrait le flux GPMF brut."""
     ffmpeg, _ = _find_ffmpeg()
     with tempfile.NamedTemporaryFile(delete=False, suffix=".bin") as tmp:
         tmp_path = tmp.name
     try:
-        cmd = [
-            ffmpeg, "-y", "-v", "error",
-            "-i", str(video_path),
-            "-codec", "copy",
-            "-map", f"0:{stream_index}",
-            "-f", "data",
-            tmp_path,
-        ]
+        cmd = [ffmpeg, "-y", "-v", "error", "-i", str(video_path),
+               "-codec", "copy", "-map", f"0:{stream_index}",
+               "-f", "data", tmp_path]
         subprocess.run(cmd, capture_output=True, check=True)
         return Path(tmp_path).read_bytes()
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
 
-# ──────────────────────────────────────────────────────────
-#  Parser GPMF (implémentation minimale)
-# ──────────────────────────────────────────────────────────
-# Format GPMF : enregistrements KLV (Key-Length-Value)
-#   - Key  : 4 bytes ASCII (FourCC)
-#   - Type : 1 byte (char type descriptor)
-#   - Size : 1 byte (taille d'un élément)
-#   - Repeat: 2 bytes uint16 big-endian (nombre d'éléments)
-# Référence : https://github.com/gopro/gpmf-parser
+# ═════════════════════════════════════════════════════════════════
+#  Parser GPMF — KLV avec conteneurs imbriqués
+# ═════════════════════════════════════════════════════════════════
+# Format : 4-byte FourCC + 1-byte Type + 1-byte Size + 2-byte Repeat + Payload
+# Type '\0' = nested container (payload = more KLV data)
+# Types courants : 'l' int32, 'L' uint32, 's' int16, 'S' uint16, 'f' float32,
+#                  'd' double, 'c' char, 'b' int8, 'B' uint8
+# Le payload est aligné sur 4 octets.
 
-def parse_gpmf(data: bytes) -> list[dict]:
-    """
-    Parse un buffer GPMF et retourne une liste d'enregistrements.
-    Implémentation minimale qui extrait GPS5 (GPS) et ACCL (accéléromètre).
-    """
-    records = []
-    pos = 0
-    length = len(data)
+_STRUCT_FMT = {
+    b"l": ("i", 4),
+    b"L": ("I", 4),
+    b"s": ("h", 2),
+    b"S": ("H", 2),
+    b"f": ("f", 4),
+    b"d": ("d", 8),
+    b"b": ("b", 1),
+    b"B": ("B", 1),
+    b"j": ("q", 8),
+    b"J": ("Q", 8),
+}
 
-    while pos + 8 <= length:
-        try:
-            fourcc = data[pos:pos + 4].decode("ascii", errors="replace")
-        except Exception:
+
+def _decode_values(payload: bytes, type_byte: bytes,
+                   elem_size: int, repeat: int) -> list:
+    """Décode un payload selon le type GPMF. Retourne une liste de tuples si
+    elem_size > taille_unité (struct composite), sinon une liste plate."""
+    fmt = _STRUCT_FMT.get(type_byte)
+    if fmt is None:
+        return []
+
+    struct_char, base_size = fmt
+    if elem_size % base_size != 0:
+        return []
+
+    values_per_elem = elem_size // base_size
+    fmt_string = ">" + struct_char * values_per_elem
+
+    out = []
+    for i in range(repeat):
+        chunk = payload[i * elem_size:(i + 1) * elem_size]
+        if len(chunk) < elem_size:
             break
+        decoded = struct.unpack(fmt_string, chunk)
+        out.append(decoded if values_per_elem > 1 else decoded[0])
+    return out
+
+
+def _iter_klv(data: bytes, offset: int = 0, end: Optional[int] = None):
+    """Itère sur les enregistrements KLV à un niveau donné."""
+    if end is None:
+        end = len(data)
+    pos = offset
+    while pos + 8 <= end:
+        fourcc = data[pos:pos + 4]
         type_byte = data[pos + 4:pos + 5]
         elem_size = data[pos + 5]
         repeat = struct.unpack(">H", data[pos + 6:pos + 8])[0]
-
         payload_size = elem_size * repeat
-        # Padding à 4 bytes
         padded = (payload_size + 3) & ~3
-        payload = data[pos + 8:pos + 8 + payload_size]
 
-        if fourcc in ("GPS5", "ACCL", "GPSU", "GPSF"):
-            records.append({
-                "fourcc": fourcc,
-                "type": type_byte,
-                "elem_size": elem_size,
-                "repeat": repeat,
-                "payload": payload,
-            })
+        payload_start = pos + 8
+        payload_end = payload_start + payload_size
 
-        if type_byte == b"\x00":  # nested
-            pos += 8
-        else:
-            pos += 8 + padded
+        yield {
+            "fourcc": fourcc.decode("ascii", errors="replace"),
+            "type": type_byte,
+            "elem_size": elem_size,
+            "repeat": repeat,
+            "payload_start": payload_start,
+            "payload_end": payload_end,
+        }
 
-    return records
+        pos = payload_start + padded
 
 
-# ──────────────────────────────────────────────────────────
-#  API publique
-# ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════
+#  Extraction des samples télémétrie
+# ═════════════════════════════════════════════════════════════════
 def extract_telemetry(video_path: str | Path) -> list[TelemetrySample]:
     """
-    Point d'entrée principal — extrait la télémétrie d'une vidéo GoPro.
+    Extrait les samples de télémétrie d'une vidéo GoPro.
 
-    Retourne une liste de samples échantillonnés à ~1 Hz.
-    Si la vidéo ne contient pas de flux GPMF, retourne une liste vide.
+    Stratégie :
+        - Chaque bloc DEVC (Device) représente ~1 seconde de données
+        - Chaque STRM (Stream) dans DEVC = un capteur (GPS5, ACCL, ...)
+        - SCAL dans un STRM = facteurs d'échelle à appliquer aux data
+        - On distribue les samples uniformément sur la seconde du DEVC
     """
     video_path = Path(video_path)
     if not video_path.exists():
-        raise FileNotFoundError(f"Vidéo introuvable : {video_path}")
+        raise FileNotFoundError(video_path)
 
     stream_idx = has_gpmf_stream(video_path)
     if stream_idx is None:
         return []
 
     try:
-        raw = extract_gpmf_bytes(video_path, stream_idx)
+        data = extract_gpmf_bytes(video_path, stream_idx)
     except subprocess.CalledProcessError:
         return []
 
-    records = parse_gpmf(raw)
+    samples: list[TelemetrySample] = []
+    devc_index = 0  # chaque DEVC ≈ 1 seconde de timeline vidéo
 
-    # TODO (J1.5) : convertir les records en TelemetrySample échantillonnés
-    # Pour l'instant, on retourne les records parsés tels quels
-    # (à raffiner avec une vraie vidéo test pour calibrer la conversion)
-    samples = []
-    # Placeholder : une vraie implémentation nécessite la table des scales
-    # (SCAL) et le mapping temporel (STMP) qui sont aussi dans le flux.
+    for devc in _iter_klv(data):
+        if devc["fourcc"] != "DEVC":
+            continue
+        devc_time_start = float(devc_index)
+        devc_index += 1
 
+        # Niveau DEVC → contient STRM et des métadonnées
+        for inner in _iter_klv(data, devc["payload_start"], devc["payload_end"]):
+            if inner["fourcc"] != "STRM":
+                continue
+
+            # Niveau STRM → contient SCAL + les données (GPS5, ACCL, ...)
+            scale = None
+            for item in _iter_klv(data, inner["payload_start"], inner["payload_end"]):
+                fourcc = item["fourcc"]
+                payload = data[item["payload_start"]:item["payload_end"]]
+
+                if fourcc == "SCAL":
+                    values = _decode_values(payload, item["type"],
+                                            item["elem_size"], item["repeat"])
+                    scale = values if values else None
+
+                elif fourcc == "GPS5":
+                    pts = _decode_values(payload, item["type"],
+                                         item["elem_size"], item["repeat"])
+                    if not pts or not isinstance(pts[0], tuple):
+                        continue
+                    n = len(pts)
+                    for i, pt in enumerate(pts):
+                        lat, lon, alt, spd2d, spd3d = (pt + (0, 0, 0, 0, 0))[:5]
+                        if scale and len(scale) >= 5:
+                            s_lat, s_lon, s_alt, s_spd2d, s_spd3d = scale[:5]
+                            lat, lon = lat / s_lat, lon / s_lon
+                            alt = alt / s_alt
+                            spd2d = spd2d / s_spd2d
+                            spd3d = spd3d / s_spd3d
+                        t = devc_time_start + (i / n)
+                        samples.append(TelemetrySample(
+                            time_s=t, lat=lat, lon=lon,
+                            altitude_m=alt,
+                            speed_mps=spd2d, speed_3d_mps=spd3d,
+                        ))
+
+                elif fourcc == "ACCL":
+                    pts = _decode_values(payload, item["type"],
+                                         item["elem_size"], item["repeat"])
+                    if not pts:
+                        continue
+                    n = len(pts)
+                    accl_scale = scale[0] if scale else 1.0
+                    for i, pt in enumerate(pts):
+                        if isinstance(pt, tuple) and len(pt) >= 3:
+                            x, y, z = pt[:3]
+                            if accl_scale:
+                                x, y, z = x / accl_scale, y / accl_scale, z / accl_scale
+                            # norme en m/s², convertir en G (1G = 9.81)
+                            norm_mps2 = (x * x + y * y + z * z) ** 0.5
+                            accel_g = norm_mps2 / 9.81
+                            t = devc_time_start + (i / n)
+                            samples.append(TelemetrySample(
+                                time_s=t, accel_g=accel_g,
+                            ))
+
+    samples.sort(key=lambda s: s.time_s)
     return samples
 
 
-# ──────────────────────────────────────────────────────────
-#  Analyse des phases du saut
-# ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════
+#  Analyse du saut parachute
+# ═════════════════════════════════════════════════════════════════
 def analyze_skydive(samples: list[TelemetrySample]) -> SkydiveAnalysis:
     """
-    À partir des samples de télémétrie, détecte les phases du saut.
+    Détecte les phases d'un saut à partir des samples télémétrie.
 
-    Règles heuristiques :
-        - Chute libre : accel_g ≈ 0 (pendant > 10 s) ET altitude décroissante rapide
-        - Sous voile  : altitude décroissante lentement (<15 m/s), accel ≈ 1G
-        - Atterrissage : altitude stable ET vitesse ≈ 0
-        - Décollage   : altitude croissante
+    Heuristiques :
+        - Chute libre : accel_g < 0.5 pendant ≥ 5s consécutifs
+        - Ces valeurs sont calibrées pour parachutisme (à ajuster sur vraies
+          données tandem)
     """
     if not samples:
         return SkydiveAnalysis(
-            duree_totale_s=0,
-            altitude_max_m=None,
-            vitesse_max_kmh=None,
-            duree_chute_libre_s=None,
+            duree_totale_s=0, altitude_max_m=None, altitude_min_m=None,
+            vitesse_max_kmh=None, duree_chute_libre_s=None,
             telemetry_disponible=False,
         )
 
-    duree = samples[-1].time_s - samples[0].time_s
     altitudes = [s.altitude_m for s in samples if s.altitude_m is not None]
-    speeds = [s.speed_mps for s in samples if s.speed_mps is not None]
+    speeds = [s.speed_3d_mps for s in samples
+              if s.speed_3d_mps is not None]
+    accels = [(s.time_s, s.accel_g) for s in samples
+              if s.accel_g is not None]
 
-    altitude_max = max(altitudes) if altitudes else None
-    vitesse_max_kmh = (max(speeds) * 3.6) if speeds else None
+    altitude_max = round(max(altitudes), 1) if altitudes else None
+    altitude_min = round(min(altitudes), 1) if altitudes else None
+    vitesse_max_kmh = round(max(speeds) * 3.6, 1) if speeds else None
+    duree = samples[-1].time_s - samples[0].time_s
 
-    phases: list[PhaseInterval] = []
+    # Détection chute libre
+    phases = []
     chute_libre_duree = 0.0
-
-    # Détection chute libre : accel_g < 0.3 pendant > 5s consécutifs
-    in_freefall = False
-    freefall_start = 0.0
-    for s in samples:
-        if s.accel_g is not None and s.accel_g < 0.3:
-            if not in_freefall:
-                in_freefall = True
-                freefall_start = s.time_s
+    in_ff = False
+    ff_start = 0.0
+    last_t = 0.0
+    for t, g in accels:
+        if g < 0.5:
+            if not in_ff:
+                in_ff = True
+                ff_start = t
         else:
-            if in_freefall and (s.time_s - freefall_start) > 5:
-                phases.append(PhaseInterval("chute_libre", freefall_start, s.time_s))
-                chute_libre_duree += s.time_s - freefall_start
-            in_freefall = False
+            if in_ff and (t - ff_start) >= 5:
+                phases.append(PhaseInterval("chute_libre",
+                                            round(ff_start, 2),
+                                            round(t, 2)))
+                chute_libre_duree += t - ff_start
+            in_ff = False
+        last_t = t
+    if in_ff and (last_t - ff_start) >= 5:
+        phases.append(PhaseInterval("chute_libre",
+                                    round(ff_start, 2),
+                                    round(last_t, 2)))
+        chute_libre_duree += last_t - ff_start
 
     return SkydiveAnalysis(
         duree_totale_s=duree,
         altitude_max_m=altitude_max,
+        altitude_min_m=altitude_min,
         vitesse_max_kmh=vitesse_max_kmh,
-        duree_chute_libre_s=chute_libre_duree or None,
+        duree_chute_libre_s=round(chute_libre_duree, 2) or None,
         phases=phases,
         stats={
             "nb_samples": len(samples),
-            "nb_phases_detectees": len(phases),
+            "nb_samples_gps": len(altitudes),
+            "nb_samples_accl": len(accels),
         },
     )
 
 
-# ──────────────────────────────────────────────────────────
-#  CLI pour test rapide
-# ──────────────────────────────────────────────────────────
+# ═════════════════════════════════════════════════════════════════
+#  CLI
+# ═════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
     import sys
-
     if len(sys.argv) < 2:
         print("Usage : python -m core.telemetry_gopro <video.mp4>")
         sys.exit(1)
 
     video = sys.argv[1]
-    print(f"[1/3] Vérification flux GPMF dans {video}...")
+    print(f"[1/3] Verification flux GPMF dans {video}...")
     idx = has_gpmf_stream(video)
     if idx is None:
-        print("  [X] Pas de flux GPMF détecté — cette vidéo n'a probablement pas de télémétrie GoPro.")
+        print("  [X] Pas de flux GPMF detecte.")
         sys.exit(2)
-    print(f"  [OK] Flux GPMF trouvé à l'index {idx}")
+    print(f"  [OK] Flux GPMF a l'index {idx}")
 
     print("[2/3] Extraction et parsing...")
     samples = extract_telemetry(video)
