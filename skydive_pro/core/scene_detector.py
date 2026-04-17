@@ -343,7 +343,13 @@ def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
 
     results = []
     fails = 0
+    quota_exhausted = False
     for t, fpath in frames:
+        # Coupe court si quota épuisé (évite 20 retries à 30s chacun)
+        if quota_exhausted:
+            results.append({"time_s": t, "scene": "erreur",
+                            "confiance": 0.0, "erreur": "quota_exhausted"})
+            continue
         try:
             # Le SDK Python accepte bytes OU base64 string dans le dict.
             # On passe en base64 pour être safe sur toutes les versions SDK.
@@ -377,9 +383,21 @@ def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
                             "confiance": 0.0, "erreur": f"json: {e}"})
         except Exception as e:
             fails += 1
-            log.warning("Gemini @ t=%ds : %s", t, e)
-            results.append({"time_s": t, "scene": "erreur",
-                            "confiance": 0.0, "erreur": str(e)[:200]})
+            err_str = str(e)
+            # Détecte quota épuisé → on arrête les requêtes suivantes
+            if "429" in err_str or "quota" in err_str.lower() \
+                    or "rate limit" in err_str.lower():
+                if not quota_exhausted:
+                    log.error("Gemini: quota épuisé à t=%ds — court-circuit "
+                              "des %d frames restantes", t,
+                              len(frames) - len(results) - 1)
+                quota_exhausted = True
+                results.append({"time_s": t, "scene": "erreur",
+                                "confiance": 0.0, "erreur": "quota_exhausted"})
+            else:
+                log.warning("Gemini @ t=%ds : %s", t, err_str[:200])
+                results.append({"time_s": t, "scene": "erreur",
+                                "confiance": 0.0, "erreur": err_str[:200]})
 
     if fails == len(frames) and frames:
         log.error("Gemini : 100%% des frames ont échoué (%d/%d)",
