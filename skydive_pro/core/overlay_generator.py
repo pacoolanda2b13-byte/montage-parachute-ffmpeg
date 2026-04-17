@@ -23,6 +23,10 @@ from typing import Optional
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from core.logger import get_logger
+
+log = get_logger(__name__)
+
 
 # ══════════════════════════════════════════════════════════════
 #  Configuration par défaut
@@ -41,8 +45,12 @@ class OverlayStyle:
 # ══════════════════════════════════════════════════════════════
 #  Helpers
 # ══════════════════════════════════════════════════════════════
+_FONT_WARNED = False
+
+
 def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     """Charge une police de fallback cross-platform."""
+    global _FONT_WARNED
     candidates = [
         "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
         "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
@@ -54,8 +62,12 @@ def _load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
         if Path(p).exists():
             try:
                 return ImageFont.truetype(p, size)
-            except OSError:
+            except OSError as e:
+                log.debug("Font %s illisible: %s", p, e)
                 continue
+    if not _FONT_WARNED:
+        log.warning("Aucune police TrueType trouvée — fallback bitmap moche")
+        _FONT_WARNED = True
     return ImageFont.load_default()
 
 
@@ -76,7 +88,8 @@ def _paste_logo(img: Image.Image, logo_path: Optional[Path], pos: tuple[int, int
         return
     try:
         logo = Image.open(logo_path).convert("RGBA")
-    except Exception:
+    except Exception as e:
+        log.warning("Logo %s illisible (%s) — overlay sans branding", logo_path, e)
         return
     logo.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
     img.paste(logo, pos, logo)
@@ -89,7 +102,8 @@ def build_intro(nom_passager: str,
                  date_saut: str,
                  logo_path: Optional[Path] = None,
                  dropzone_nom: str = "",
-                 style: Optional[OverlayStyle] = None) -> Path:
+                 style: Optional[OverlayStyle] = None,
+                 output_dir: Optional[Path] = None) -> Path:
     """Crée une image d'intro avec logo + nom passager + date."""
     style = style or OverlayStyle()
     img = Image.new("RGBA", (style.width, style.height), (0, 0, 0, 0))
@@ -136,7 +150,9 @@ def build_intro(nom_passager: str,
     _draw_text_shadow(draw, ((style.width - sub_w) // 2, line_y + 30),
                        sub_text, f_sub, fill=(220, 220, 230, 255))
 
-    out = Path(tempfile.mkdtemp(prefix="overlay_")) / "intro.png"
+    out_dir = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="overlay_"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "intro.png"
     img.save(out, "PNG")
     return out
 
@@ -144,7 +160,8 @@ def build_intro(nom_passager: str,
 def build_outro(dropzone_nom: str = "",
                  site_web: str = "",
                  logo_path: Optional[Path] = None,
-                 style: Optional[OverlayStyle] = None) -> Path:
+                 style: Optional[OverlayStyle] = None,
+                 output_dir: Optional[Path] = None) -> Path:
     """Image d'outro : logo + CTA."""
     style = style or OverlayStyle()
     img = Image.new("RGBA", (style.width, style.height),
@@ -173,7 +190,9 @@ def build_outro(dropzone_nom: str = "",
         draw.text(((style.width - sw) // 2, style.height // 2 + 140),
                    site_web, font=f_med, fill=style.color_primary)
 
-    out = Path(tempfile.mkdtemp(prefix="overlay_")) / "outro.png"
+    out_dir = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="overlay_"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "outro.png"
     img.save(out, "PNG")
     return out
 
@@ -181,7 +200,8 @@ def build_outro(dropzone_nom: str = "",
 def build_stats_panel(altitude_max_m: Optional[float],
                        vitesse_max_kmh: Optional[float],
                        duree_chute_s: Optional[float],
-                       style: Optional[OverlayStyle] = None) -> Path:
+                       style: Optional[OverlayStyle] = None,
+                       output_dir: Optional[Path] = None) -> Path:
     """Panneau stats à afficher en fin de montage."""
     style = style or OverlayStyle()
     img = Image.new("RGBA", (style.width, style.height), (0, 0, 0, 0))
@@ -237,7 +257,9 @@ def build_stats_panel(altitude_max_m: Optional[float],
             draw.text((cx - uw // 2, 560), unit, font=f_unit,
                        fill=style.color_primary)
 
-    out = Path(tempfile.mkdtemp(prefix="overlay_")) / "stats.png"
+    out_dir = Path(output_dir) if output_dir else Path(tempfile.mkdtemp(prefix="overlay_"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "stats.png"
     img.save(out, "PNG")
     return out
 

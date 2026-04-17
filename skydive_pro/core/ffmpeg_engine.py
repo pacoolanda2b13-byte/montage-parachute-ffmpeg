@@ -25,6 +25,10 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from core.logger import get_logger
+
+log = get_logger(__name__)
+
 
 # ══════════════════════════════════════════════════════════════
 #  Helpers
@@ -35,21 +39,34 @@ def _find_ffmpeg() -> tuple[str, str]:
 
 
 def _pick_encoder(preferred: Optional[str] = None) -> str:
-    """Choisit le meilleur encodeur disponible : AMF (AMD) > NVENC > videotoolbox > x264."""
+    """Choisit le meilleur encodeur : AMF > NVENC > VideoToolbox > QSV > x264.
+
+    Lève RuntimeError si ffmpeg absent (plus utile qu'un fallback silencieux).
+    """
     preferred = preferred or os.environ.get("ENCODEUR_VIDEO")
     ffmpeg, _ = _find_ffmpeg()
     try:
         res = subprocess.run([ffmpeg, "-hide_banner", "-encoders"],
                               capture_output=True, text=True, timeout=10)
         available = res.stdout
-    except Exception:
+    except FileNotFoundError as e:
+        log.error("ffmpeg introuvable dans PATH")
+        raise RuntimeError("ffmpeg introuvable — installe FFmpeg") from e
+    except subprocess.TimeoutExpired:
+        log.warning("ffmpeg -encoders timeout — fallback libx264")
+        available = ""
+    except subprocess.CalledProcessError as e:
+        log.warning("ffmpeg -encoders échoué: %s", e)
         available = ""
 
     if preferred and preferred in available:
+        log.info("Encodeur sélectionné (preferred) : %s", preferred)
         return preferred
     for enc in ("h264_amf", "h264_nvenc", "h264_videotoolbox", "h264_qsv"):
         if enc in available:
+            log.info("Encodeur sélectionné : %s", enc)
             return enc
+    log.info("Encodeur sélectionné : libx264 (CPU fallback)")
     return "libx264"
 
 
@@ -95,13 +112,18 @@ def _still_to_clip(still_img: Path, duration: float, out_path: Path,
 
 
 def _concat_clips(clips: list[Path], out_path: Path, encoder: str) -> Path:
-    """Concatène des clips déjà normalisés via le demuxer concat."""
+    """Concatène des clips déjà normalisés via le demuxer concat.
+
+    Échappe les apostrophes dans les chemins pour éviter de casser le format.
+    """
     ffmpeg, _ = _find_ffmpeg()
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False,
                                         encoding="utf-8") as f:
         list_path = Path(f.name)
         for c in clips:
-            f.write(f"file '{c.as_posix()}'\n")
+            # Échappe les apostrophes selon le format concat FFmpeg
+            path_str = c.as_posix().replace("'", "'\\''")
+            f.write(f"file '{path_str}'\n")
 
     try:
         cmd = [
@@ -187,15 +209,22 @@ def select_best_clips(segments: list[dict],
         # Garder le plus long segment de la scène
         best = max(segs, key=lambda s: s["end_s"] - s["start_s"])
         target = SCENE_DURATIONS_CIBLE.get(scene, 8)
-        seg_dur = best["end_s"] - best["start_s"]
+        seg_start = max(0.0, best["start_s"])
+        seg_end = max(seg_start, best["end_s"])
+        seg_dur = seg_end - seg_start
         if seg_dur <= target:
-            out.append({"start_s": best["start_s"],
-                        "end_s": best["end_s"], "scene": scene})
+            out.append({"start_s": seg_start,
+                        "end_s": seg_end, "scene": scene})
         else:
-            # Prendre le milieu
-            mid = (best["start_s"] + best["end_s"]) / 2
-            out.append({"start_s": mid - target / 2,
-                        "end_s": mid + target / 2, "scene": scene})
+            # Prendre le milieu, clampé à [0, seg_end]
+            mid = (seg_start + seg_end) / 2
+            half = target / 2
+            new_start = max(0.0, mid - half)
+            new_end = min(seg_end, new_start + target)
+            # Si on a rogné à gauche, décale à gauche pour garder target secs
+            if new_end - new_start < target:
+                new_start = max(0.0, new_end - target)
+            out.append({"start_s": new_start, "end_s": new_end, "scene": scene})
     return out
 
 
@@ -238,14 +267,22 @@ def build_montage(video_source: str | Path,
             clips_files.append(intro_clip)
 
         # Clips
+        clips_perdus = []
         for i, seg in enumerate(best):
             out = tmpdir / f"clip_{i:02d}_{seg['scene']}.mp4"
             try:
                 _cut_clip(video_source, seg["start_s"], seg["end_s"], out,
                            width, height, fps)
                 clips_files.append(out)
-            except subprocess.CalledProcessError:
-                continue  # skip clip qui plante
+            except subprocess.CalledProcessError as e:
+                err = (e.stderr or b"").decode("utf-8", errors="replace")[:300]
+                log.error("Clip %s [%.1f-%.1f] échec: %s",
+                           seg["scene"], seg["start_s"], seg["end_s"], err)
+                clips_perdus.append(seg["scene"])
+                continue
+        if clips_perdus:
+            log.warning("Scènes perdues dans le montage: %s",
+                         ", ".join(clips_perdus))
 
         # Stats overlay (4s)
         if stats_overlay:

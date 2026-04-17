@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import base64
 import json
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, asdict
@@ -27,6 +28,14 @@ from pathlib import Path
 from typing import Optional
 
 from core.telemetry_gopro import extract_telemetry, TelemetrySample
+from core.logger import get_logger
+
+log = get_logger(__name__)
+
+
+def _find_ffmpeg_tools() -> tuple[str, str]:
+    return (shutil.which("ffmpeg") or "ffmpeg",
+            shutil.which("ffprobe") or "ffprobe")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -124,21 +133,34 @@ def analyze_audio(video_path: str | Path, sample_rate: int = 22050) -> dict:
         import librosa
         import numpy as np
     except ImportError:
-        return {"disponible": False, "labels": []}
+        log.warning("librosa non installé — détection audio désactivée")
+        return {"disponible": False, "labels": [], "raison": "librosa_missing"}
 
     video_path = Path(video_path)
+    ffmpeg_bin, _ = _find_ffmpeg_tools()
     # Extraire l'audio en WAV mono 22050 Hz via ffmpeg
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
         tmp_wav = tmp.name
     try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-i", str(video_path),
-             "-ac", "1", "-ar", str(sample_rate), tmp_wav],
-            capture_output=True, check=True,
-        )
-        y, sr = librosa.load(tmp_wav, sr=sample_rate, mono=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return {"disponible": False, "labels": []}
+        try:
+            subprocess.run(
+                [ffmpeg_bin, "-y", "-v", "error", "-i", str(video_path),
+                 "-ac", "1", "-ar", str(sample_rate), tmp_wav],
+                capture_output=True, check=True,
+            )
+        except FileNotFoundError:
+            log.error("ffmpeg introuvable — audio désactivé")
+            return {"disponible": False, "labels": [], "raison": "ffmpeg_missing"}
+        except subprocess.CalledProcessError as e:
+            log.warning("Extraction audio ffmpeg échouée: %s",
+                        (e.stderr or b"").decode("utf-8", errors="replace")[:200])
+            return {"disponible": False, "labels": [], "raison": "ffmpeg_failed"}
+
+        try:
+            y, sr = librosa.load(tmp_wav, sr=sample_rate, mono=True)
+        except Exception as e:
+            log.warning("librosa.load a échoué: %s", e)
+            return {"disponible": False, "labels": [], "raison": "librosa_load_failed"}
     finally:
         Path(tmp_wav).unlink(missing_ok=True)
 
@@ -221,52 +243,60 @@ def phases_from_audio(audio_result: dict) -> list[SceneSegment]:
 def extract_keyframes(video_path: str | Path,
                       every_n_sec: int = 30,
                       output_dir: Optional[Path] = None) -> list[tuple[float, Path]]:
-    """Extrait des keyframes tous les N secondes. Retourne (time_s, path)."""
+    """Extrait des keyframes tous les N secondes. Retourne (time_s, path).
+
+    Si output_dir est None, crée un répertoire temp (appelant responsable du
+    cleanup). Logge chaque frame qui échoue.
+    """
     video_path = Path(video_path)
     output_dir = output_dir or Path(tempfile.mkdtemp(prefix="keyframes_"))
     output_dir.mkdir(exist_ok=True)
+    ffmpeg_bin, ffprobe_bin = _find_ffmpeg_tools()
 
     # Durée de la vidéo via ffprobe
-    cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+    cmd = [ffprobe_bin, "-v", "error", "-show_entries", "format=duration",
            "-of", "json", str(video_path)]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=True)
         duration = float(json.loads(res.stdout)["format"]["duration"])
-    except Exception:
+    except FileNotFoundError:
+        log.error("ffprobe introuvable — keyframes désactivées")
+        return []
+    except (subprocess.CalledProcessError, json.JSONDecodeError,
+            KeyError, ValueError) as e:
+        log.warning("ffprobe durée a échoué sur %s: %s", video_path, e)
         return []
 
-    timestamps = [t for t in range(0, int(duration), every_n_sec)]
+    timestamps = list(range(0, int(duration), every_n_sec))
     frames = []
+    fails = 0
     for i, t in enumerate(timestamps):
         out = output_dir / f"frame_{i:04d}_t{t}.jpg"
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-ss", str(t),
-             "-i", str(video_path), "-frames:v", "1",
-             "-vf", "scale=640:-1", "-q:v", "5", str(out)],
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                [ffmpeg_bin, "-y", "-v", "error", "-ss", str(t),
+                 "-i", str(video_path), "-frames:v", "1",
+                 "-vf", "scale=640:-1", "-q:v", "5", str(out)],
+                capture_output=True, check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            fails += 1
+            log.debug("Keyframe t=%ds échouée: %s", t,
+                      (e.stderr or b"").decode("utf-8", errors="replace")[:100])
+            continue
+        except FileNotFoundError:
+            log.error("ffmpeg introuvable pendant extraction keyframes")
+            break
         if out.exists():
             frames.append((float(t), out))
 
+    if fails:
+        log.info("Keyframes: %d/%d extraites (%d échecs)",
+                 len(frames), len(timestamps), fails)
     return frames
 
 
-def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
-                                    api_key: Optional[str] = None) -> list[dict]:
-    """Classifie chaque keyframe via Gemini Flash (gratuit)."""
-    api_key = api_key or os.environ.get("GEMINI_API_KEY")
-    if not api_key or not frames:
-        return []
-
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        return []
-
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(os.environ.get("GEMINI_MODEL", "gemini-1.5-flash"))
-
-    prompt = """Tu analyses une photo extraite d'une vidéo de saut en parachute tandem.
+_GEMINI_PROMPT = """Tu analyses une photo extraite d'une vidéo de saut en parachute tandem.
 Classifie UNE seule scène parmi cette liste exacte :
 - briefing (passager et moniteur au sol, équipement, gestes d'explication)
 - vehicule_embarquement (voiture/minibus, personne qui monte ou descend)
@@ -282,44 +312,98 @@ Classifie UNE seule scène parmi cette liste exacte :
 Réponds UNIQUEMENT avec un JSON compact :
 {"scene": "nom_scene", "confiance": 0.0-1.0}"""
 
+
+def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
+                                    api_key: Optional[str] = None) -> list[dict]:
+    """Classifie chaque keyframe via Gemini Flash (gratuit).
+
+    Si la clé API est absente ou Gemini non installé, retourne une liste
+    contenant un marqueur d'erreur explicite. Logge chaque frame qui plante.
+    """
+    api_key = api_key or os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        log.info("GEMINI_API_KEY absente — classification vision désactivée")
+        return []
+    if not frames:
+        return []
+
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        log.warning("google-generativeai non installé — vision désactivée")
+        return []
+
+    try:
+        genai.configure(api_key=api_key)
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
+        model = genai.GenerativeModel(model_name)
+    except Exception as e:
+        log.error("Configuration Gemini échouée: %s", e)
+        return []
+
     results = []
+    fails = 0
     for t, fpath in frames:
         try:
+            # Le SDK Python accepte bytes OU base64 string dans le dict.
+            # On passe en base64 pour être safe sur toutes les versions SDK.
             with open(fpath, "rb") as f:
-                img_data = f.read()
+                img_bytes = f.read()
+            img_b64 = base64.b64encode(img_bytes).decode("ascii")
+
             response = model.generate_content([
-                {"mime_type": "image/jpeg", "data": img_data},
-                prompt,
+                {"mime_type": "image/jpeg", "data": img_b64},
+                _GEMINI_PROMPT,
             ])
-            text = response.text.strip()
+            text = (response.text or "").strip()
             # Nettoyer markdown si présent
             if text.startswith("```"):
-                text = text.split("\n", 1)[1].rsplit("\n", 1)[0]
-                if text.startswith("json"):
-                    text = text[4:].strip()
+                parts = text.split("\n", 1)
+                if len(parts) == 2:
+                    text = parts[1].rsplit("\n", 1)[0]
+                    if text.startswith("json"):
+                        text = text[4:].strip()
+
             parsed = json.loads(text)
             results.append({
                 "time_s": t,
                 "scene": parsed.get("scene", "autre"),
                 "confiance": float(parsed.get("confiance", 0.5)),
             })
+        except json.JSONDecodeError as e:
+            fails += 1
+            log.warning("Gemini @ t=%ds : JSON invalide (%s)", t, e)
+            results.append({"time_s": t, "scene": "erreur",
+                            "confiance": 0.0, "erreur": f"json: {e}"})
         except Exception as e:
-            results.append({"time_s": t, "scene": "autre", "confiance": 0.0, "erreur": str(e)})
+            fails += 1
+            log.warning("Gemini @ t=%ds : %s", t, e)
+            results.append({"time_s": t, "scene": "erreur",
+                            "confiance": 0.0, "erreur": str(e)[:200]})
+
+    if fails == len(frames) and frames:
+        log.error("Gemini : 100%% des frames ont échoué (%d/%d)",
+                  fails, len(frames))
+
     return results
 
 
 def phases_from_vision(gemini_results: list[dict],
                         total_duration_s: float) -> list[SceneSegment]:
-    """Convertit les classifications Gemini en segments de scènes."""
+    """Convertit les classifications Gemini en segments de scènes.
+
+    Exclut les entrées 'autre' (non reconnues) et 'erreur' (échec technique).
+    """
     segments = []
     for i, r in enumerate(gemini_results):
-        if r["scene"] == "autre":
+        scene = r.get("scene")
+        if scene in (None, "autre", "erreur"):
             continue
         start = r["time_s"]
-        # durée jusqu'au prochain keyframe
-        end = gemini_results[i + 1]["time_s"] if i + 1 < len(gemini_results) else total_duration_s
+        end = (gemini_results[i + 1]["time_s"]
+               if i + 1 < len(gemini_results) else total_duration_s)
         segments.append(SceneSegment(
-            r["scene"], start, end, r["confiance"], source="vision"
+            scene, start, end, r.get("confiance", 0.5), source="vision"
         ))
     return segments
 
@@ -381,17 +465,25 @@ def detect_scenes(video_path: str | Path,
     # 3. Vision (optionnel, coûte quelques requêtes Gemini)
     vision_segs = []
     nb_keyframes = 0
+    nb_vision_erreurs = 0
+    kf_dir: Optional[Path] = None
     if use_vision:
-        frames = extract_keyframes(video_path, every_n_sec=keyframe_interval)
-        nb_keyframes = len(frames)
-        gemini_results = classify_keyframes_with_gemini(frames)
-        # Durée totale
-        duration_s = samples[-1].time_s if samples else (frames[-1][0] if frames else 60)
-        vision_segs = phases_from_vision(gemini_results, duration_s)
-        # Nettoyage des keyframes temporaires
-        for _, fp in frames:
-            try: fp.unlink()
-            except Exception: pass
+        kf_dir = Path(tempfile.mkdtemp(prefix="keyframes_"))
+        try:
+            frames = extract_keyframes(video_path,
+                                        every_n_sec=keyframe_interval,
+                                        output_dir=kf_dir)
+            nb_keyframes = len(frames)
+            gemini_results = classify_keyframes_with_gemini(frames)
+            nb_vision_erreurs = sum(1 for r in gemini_results
+                                     if r.get("scene") == "erreur")
+            # Durée totale
+            duration_s = (samples[-1].time_s if samples
+                          else (frames[-1][0] if frames else 60))
+            vision_segs = phases_from_vision(gemini_results, duration_s)
+        finally:
+            # Cleanup du répertoire temp + de tous les fichiers dedans
+            shutil.rmtree(kf_dir, ignore_errors=True)
 
     # 4. Fusion
     fused = merge_signals(telemetry_segs, audio_segs, vision_segs)
@@ -404,7 +496,9 @@ def detect_scenes(video_path: str | Path,
             "nb_segments_audio": len(audio_segs),
             "nb_segments_vision": len(vision_segs),
             "nb_keyframes_analyses": nb_keyframes,
+            "nb_vision_erreurs": nb_vision_erreurs,
             "audio_disponible": audio_result.get("disponible", False),
+            "audio_raison": audio_result.get("raison"),
             "vision_activee": use_vision,
         }
     }

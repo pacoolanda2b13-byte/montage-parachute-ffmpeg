@@ -31,6 +31,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from core.logger import get_logger
+
+log = get_logger(__name__)
+
 
 # ═════════════════════════════════════════════════════════════════
 #  Modèles de données
@@ -91,20 +95,36 @@ def _find_ffmpeg() -> tuple[str, str]:
 
 
 def has_gpmf_stream(video_path: str | Path) -> Optional[int]:
-    """Retourne l'index du flux GPMF ou None s'il n'existe pas."""
+    """Retourne l'index du flux GPMF ou None s'il n'existe pas.
+
+    Lève RuntimeError si ffprobe est introuvable (distinction claire avec
+    'pas de flux GPMF').
+    """
     _, ffprobe = _find_ffmpeg()
     cmd = [ffprobe, "-v", "error", "-print_format", "json",
            "-show_streams", str(video_path)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    except FileNotFoundError as e:
+        log.error("ffprobe introuvable dans PATH")
+        raise RuntimeError("ffprobe introuvable — installe FFmpeg") from e
+    except subprocess.CalledProcessError as e:
+        log.warning("ffprobe a échoué sur %s: %s", video_path,
+                    (e.stderr or b"").decode("utf-8", errors="replace")[:200])
+        return None
+    except json.JSONDecodeError as e:
+        log.warning("ffprobe stdout invalide: %s", e)
         return None
 
-    for stream in json.loads(result.stdout).get("streams", []):
+    try:
+        streams = json.loads(result.stdout).get("streams", [])
+    except json.JSONDecodeError:
+        return None
+    for stream in streams:
         codec_tag = stream.get("codec_tag_string", "")
         handler = stream.get("tags", {}).get("handler_name", "")
         if codec_tag == "gpmd" or "GoPro MET" in handler:
-            return stream["index"]
+            return stream.get("index")
     return None
 
 
@@ -149,13 +169,16 @@ _STRUCT_FMT = {
 def _decode_values(payload: bytes, type_byte: bytes,
                    elem_size: int, repeat: int) -> list:
     """Décode un payload selon le type GPMF. Retourne une liste de tuples si
-    elem_size > taille_unité (struct composite), sinon une liste plate."""
+    elem_size > taille_unité (struct composite), sinon une liste plate.
+
+    Retourne une liste vide en cas de données corrompues (silencieux mais loggé
+    en debug car ça peut arriver sur bordures de blocs)."""
     fmt = _STRUCT_FMT.get(type_byte)
     if fmt is None:
         return []
 
     struct_char, base_size = fmt
-    if elem_size % base_size != 0:
+    if elem_size == 0 or elem_size % base_size != 0:
         return []
 
     values_per_elem = elem_size // base_size
@@ -166,15 +189,25 @@ def _decode_values(payload: bytes, type_byte: bytes,
         chunk = payload[i * elem_size:(i + 1) * elem_size]
         if len(chunk) < elem_size:
             break
-        decoded = struct.unpack(fmt_string, chunk)
+        try:
+            decoded = struct.unpack(fmt_string, chunk)
+        except struct.error as e:
+            log.debug("struct.unpack failed (type=%r size=%d): %s",
+                      type_byte, elem_size, e)
+            break
         out.append(decoded if values_per_elem > 1 else decoded[0])
     return out
 
 
 def _iter_klv(data: bytes, offset: int = 0, end: Optional[int] = None):
-    """Itère sur les enregistrements KLV à un niveau donné."""
+    """Itère sur les enregistrements KLV à un niveau donné.
+
+    Clamp strictement toutes les bornes sur [offset, end] pour éviter les
+    lectures hors-bornes sur vidéos tronquées ou GPMF corrompu.
+    """
     if end is None:
         end = len(data)
+    end = min(end, len(data))
     pos = offset
     while pos + 8 <= end:
         fourcc = data[pos:pos + 4]
@@ -185,7 +218,12 @@ def _iter_klv(data: bytes, offset: int = 0, end: Optional[int] = None):
         padded = (payload_size + 3) & ~3
 
         payload_start = pos + 8
-        payload_end = payload_start + payload_size
+        # Clamp strict : jamais au-delà de end
+        payload_end = min(payload_start + payload_size, end)
+        next_pos = min(payload_start + padded, end)
+        if next_pos <= pos:
+            # Progression impossible (elem_size=0 avec repeat=0 par ex) → stop
+            break
 
         yield {
             "fourcc": fourcc.decode("ascii", errors="replace"),
@@ -196,7 +234,7 @@ def _iter_klv(data: bytes, offset: int = 0, end: Optional[int] = None):
             "payload_end": payload_end,
         }
 
-        pos = payload_start + padded
+        pos = next_pos
 
 
 # ═════════════════════════════════════════════════════════════════
@@ -222,8 +260,13 @@ def extract_telemetry(video_path: str | Path) -> list[TelemetrySample]:
 
     try:
         data = extract_gpmf_bytes(video_path, stream_idx)
-    except subprocess.CalledProcessError:
+    except subprocess.CalledProcessError as e:
+        log.error("Extraction GPMF a échoué pour %s: %s", video_path,
+                  (e.stderr or b"").decode("utf-8", errors="replace")[:500])
         return []
+    except FileNotFoundError:
+        log.error("ffmpeg introuvable — impossible d'extraire GPMF")
+        raise RuntimeError("ffmpeg introuvable") from None
 
     samples: list[TelemetrySample] = []
     devc_index = 0  # chaque DEVC ≈ 1 seconde de timeline vidéo
@@ -260,6 +303,9 @@ def extract_telemetry(video_path: str | Path) -> list[TelemetrySample]:
                         lat, lon, alt, spd2d, spd3d = (pt + (0, 0, 0, 0, 0))[:5]
                         if scale and len(scale) >= 5:
                             s_lat, s_lon, s_alt, s_spd2d, s_spd3d = scale[:5]
+                            # Garde stricte contre ZeroDivisionError (GPS non fixé)
+                            if not all((s_lat, s_lon, s_alt, s_spd2d, s_spd3d)):
+                                continue
                             lat, lon = lat / s_lat, lon / s_lon
                             alt = alt / s_alt
                             spd2d = spd2d / s_spd2d

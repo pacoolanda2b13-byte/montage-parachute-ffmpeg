@@ -23,7 +23,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import tempfile
 import time
+import traceback
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
@@ -33,6 +36,9 @@ from core.telemetry_gopro import extract_telemetry, analyze_skydive
 from core.scene_detector import detect_scenes
 from core.overlay_generator import build_intro, build_outro, build_stats_panel
 from core.ffmpeg_engine import build_montage
+from core.logger import get_logger
+
+log = get_logger(__name__)
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -94,93 +100,118 @@ def process_jump(video_path: str | Path,
         result.erreurs.append(f"Vidéo introuvable : {video_path}")
         return result
 
-    # ── 1. Télémétrie ────────────────────────────────────────
-    t = _timer()
+    # Tmpdir unique pour tous les overlays d'un job → cleanup facile
+    overlays_dir = Path(tempfile.mkdtemp(prefix=f"skydive_overlays_{job_id}_"))
+    log.info("[%s] Pipeline démarré — video=%s", job_id, video_path.name)
+
     try:
-        samples = extract_telemetry(video_path)
-        analysis = analyze_skydive(samples)
-        result.analyse_telemetrie = analysis.to_dict()
-        result.ajouter_etape("telemetrie", _timer() - t, True,
-                              f"{len(samples)} samples, alt_max={analysis.altitude_max_m}")
-    except Exception as e:
-        result.ajouter_etape("telemetrie", _timer() - t, False, str(e))
-        result.erreurs.append(f"Télémétrie : {e}")
+        # ── 1. Télémétrie ────────────────────────────────────────
+        t = _timer()
         analysis = None
+        try:
+            samples = extract_telemetry(video_path)
+            analysis = analyze_skydive(samples)
+            result.analyse_telemetrie = analysis.to_dict()
+            result.ajouter_etape("telemetrie", _timer() - t, True,
+                                  f"{len(samples)} samples, alt_max={analysis.altitude_max_m}")
+        except RuntimeError as e:
+            # ffprobe/ffmpeg absent : erreur bloquante
+            log.error("[%s] Télémétrie bloquante: %s", job_id, e)
+            result.ajouter_etape("telemetrie", _timer() - t, False, str(e))
+            result.erreurs.append(f"Télémétrie : {e}")
+        except Exception as e:
+            log.error("[%s] Télémétrie: %s\n%s", job_id, e, traceback.format_exc())
+            result.ajouter_etape("telemetrie", _timer() - t, False, str(e))
+            result.erreurs.append(f"Télémétrie : {e}")
 
-    # ── 2. Détection de scènes ───────────────────────────────
-    t = _timer()
-    try:
-        scenes_result = detect_scenes(video_path,
-                                       use_vision=use_vision,
-                                       keyframe_interval=keyframe_interval)
-        segments = scenes_result["segments"]
-        result.scenes_detectees = len(segments)
-        result.ajouter_etape("detection_scenes", _timer() - t, True,
-                              f"{len(segments)} segments, "
-                              f"vision_activee={scenes_result['stats'].get('vision_activee')}")
-    except Exception as e:
-        result.ajouter_etape("detection_scenes", _timer() - t, False, str(e))
-        result.erreurs.append(f"Détection scènes : {e}")
+        # ── 2. Détection de scènes ───────────────────────────────
+        t = _timer()
         segments = []
+        try:
+            scenes_result = detect_scenes(video_path,
+                                           use_vision=use_vision,
+                                           keyframe_interval=keyframe_interval)
+            segments = scenes_result["segments"]
+            result.scenes_detectees = len(segments)
+            result.ajouter_etape("detection_scenes", _timer() - t, True,
+                                  f"{len(segments)} segments, "
+                                  f"vision_activee={scenes_result['stats'].get('vision_activee')}")
+        except Exception as e:
+            log.error("[%s] Détection scènes: %s\n%s", job_id, e, traceback.format_exc())
+            result.ajouter_etape("detection_scenes", _timer() - t, False, str(e))
+            result.erreurs.append(f"Détection scènes : {e}")
 
-    # ── 3. Overlays ──────────────────────────────────────────
-    t = _timer()
-    intro = outro = stats = None
-    try:
-        date_fmt = date_saut
-        if date_saut:
-            try:
-                date_fmt = datetime.strptime(date_saut, "%Y-%m-%d").strftime("%d/%m/%Y")
-            except ValueError:
-                pass
+        # ── 3. Overlays ──────────────────────────────────────────
+        t = _timer()
+        intro = outro = stats = None
+        try:
+            date_fmt = date_saut
+            if date_saut:
+                try:
+                    date_fmt = datetime.strptime(date_saut, "%Y-%m-%d").strftime("%d/%m/%Y")
+                except ValueError as ve:
+                    log.warning("[%s] Date invalide '%s' (%s) — utilisée brute",
+                                 job_id, date_saut, ve)
 
-        intro = build_intro(nom_passager=nom_passager,
-                             date_saut=date_fmt or "",
-                             logo_path=logo_path,
-                             dropzone_nom=dropzone_nom)
-        outro = build_outro(dropzone_nom=dropzone_nom,
-                             site_web=dropzone_site,
-                             logo_path=logo_path)
-        if analysis:
-            stats = build_stats_panel(
-                altitude_max_m=analysis.altitude_max_m,
-                vitesse_max_kmh=analysis.vitesse_max_kmh,
-                duree_chute_s=analysis.duree_chute_libre_s,
+            intro = build_intro(nom_passager=nom_passager,
+                                 date_saut=date_fmt or "",
+                                 logo_path=logo_path,
+                                 dropzone_nom=dropzone_nom,
+                                 output_dir=overlays_dir)
+            outro = build_outro(dropzone_nom=dropzone_nom,
+                                 site_web=dropzone_site,
+                                 logo_path=logo_path,
+                                 output_dir=overlays_dir)
+            if analysis:
+                stats = build_stats_panel(
+                    altitude_max_m=analysis.altitude_max_m,
+                    vitesse_max_kmh=analysis.vitesse_max_kmh,
+                    duree_chute_s=analysis.duree_chute_libre_s,
+                    output_dir=overlays_dir,
+                )
+            result.ajouter_etape("overlays", _timer() - t, True,
+                                  f"intro={intro.name if intro else '-'}")
+        except Exception as e:
+            log.error("[%s] Overlays: %s\n%s", job_id, e, traceback.format_exc())
+            result.ajouter_etape("overlays", _timer() - t, False, str(e))
+            result.erreurs.append(f"Overlays : {e}")
+
+        # ── 4. Montage final ─────────────────────────────────────
+        t = _timer()
+        try:
+            output_file = output_dir / f"{job_id}_{Path(video_path).stem}_montage.mp4"
+            build_montage(
+                video_source=video_path,
+                segments=segments,
+                output_path=output_file,
+                intro_overlay=intro,
+                outro_overlay=outro,
+                stats_overlay=stats,
+                music_path=music_path,
+                max_duration_s=max_duration_s,
             )
-        result.ajouter_etape("overlays", _timer() - t, True,
-                              f"intro={intro.name if intro else '-'}")
-    except Exception as e:
-        result.ajouter_etape("overlays", _timer() - t, False, str(e))
-        result.erreurs.append(f"Overlays : {e}")
+            if output_file.exists():
+                result.fichier_montage = str(output_file)
+                result.taille_montage_mb = round(
+                    output_file.stat().st_size / (1024 * 1024), 2)
+                result.statut = "succes"
+            result.ajouter_etape("montage", _timer() - t, True,
+                                  f"fichier={output_file.name}")
+        except Exception as e:
+            log.error("[%s] Montage: %s\n%s", job_id, e, traceback.format_exc())
+            result.ajouter_etape("montage", _timer() - t, False, str(e))
+            result.erreurs.append(f"Montage : {e}")
 
-    # ── 4. Montage final ─────────────────────────────────────
-    t = _timer()
-    try:
-        output_file = output_dir / f"{job_id}_{Path(video_path).stem}_montage.mp4"
-        build_montage(
-            video_source=video_path,
-            segments=segments,
-            output_path=output_file,
-            intro_overlay=intro,
-            outro_overlay=outro,
-            stats_overlay=stats,
-            music_path=music_path,
-            max_duration_s=max_duration_s,
-        )
-        if output_file.exists():
-            result.fichier_montage = str(output_file)
-            result.taille_montage_mb = round(
-                output_file.stat().st_size / (1024 * 1024), 2)
-            result.statut = "succes"
-        result.ajouter_etape("montage", _timer() - t, True,
-                              f"fichier={output_file.name}")
-    except Exception as e:
-        result.ajouter_etape("montage", _timer() - t, False, str(e))
-        result.erreurs.append(f"Montage : {e}")
+    finally:
+        # Cleanup overlays tmpdir — toujours, même en cas d'exception
+        shutil.rmtree(overlays_dir, ignore_errors=True)
 
     result.duree_traitement_s = round(_timer() - t_global, 2)
     if result.statut != "succes" and not result.erreurs:
         result.statut = "partiel"
+
+    log.info("[%s] Pipeline terminé (%s) en %.1fs — %d erreurs",
+             job_id, result.statut, result.duree_traitement_s, len(result.erreurs))
     return result
 
 

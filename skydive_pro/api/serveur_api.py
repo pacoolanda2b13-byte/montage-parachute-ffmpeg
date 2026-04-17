@@ -18,13 +18,18 @@ Lancement :
 
 import os
 import sys
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Optional
 
 from flask import Flask, jsonify, render_template, request
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
+
+from core.logger import get_logger
+log = get_logger(__name__)
 
 try:
     from dotenv import load_dotenv
@@ -32,13 +37,13 @@ try:
     if env_path.exists():
         load_dotenv(env_path)
 except ImportError:
-    print("[warn] python-dotenv non installé — .env ignoré")
+    log.warning("python-dotenv non installé — .env ignoré")
 
 try:
     import yaml
 except ImportError:
     yaml = None
-    print("[warn] pyyaml non installé — config.yaml ignoré")
+    log.warning("pyyaml non installé — config.yaml ignoré")
 
 
 app = Flask(
@@ -154,6 +159,19 @@ def api_demo_jobs():
 
 
 JOBS_STATE: dict = {}
+_JOBS_LOCK = threading.Lock()
+
+
+def _update_job(job_id: str, **fields) -> None:
+    with _JOBS_LOCK:
+        state = JOBS_STATE.setdefault(job_id, {})
+        state.update(fields)
+
+
+def _get_job(job_id: str) -> Optional[dict]:
+    with _JOBS_LOCK:
+        state = JOBS_STATE.get(job_id)
+        return dict(state) if state else None
 
 
 @app.route("/api/nouveau-saut", methods=["POST"])
@@ -189,26 +207,26 @@ def api_nouveau_saut():
     except Exception as e:
         return jsonify({"erreur": f"Erreur sauvegarde : {e}"}), 500
 
-    # État initial
-    JOBS_STATE[job_id] = {
-        "statut": "en_cours",
-        "etape": "Enregistrement terminé, démarrage pipeline...",
-        "progression": 0,
-        "passager": f"{prenom} {nom}",
-        "email": email,
-        "date_saut": date_saut,
-        "moniteur": moniteur,
-        "fichier_source": safe_name,
-        "taille_mb": round(taille_mb, 1),
-    }
+    # État initial — thread-safe
+    _update_job(job_id,
+                 statut="en_cours",
+                 etape="Enregistrement terminé, démarrage pipeline...",
+                 progression=0,
+                 passager=f"{prenom} {nom}",
+                 email=email,
+                 date_saut=date_saut,
+                 moniteur=moniteur,
+                 fichier_source=safe_name,
+                 taille_mb=round(taille_mb, 1))
 
     # Lancer le pipeline en arrière-plan (non-bloquant)
     def run_pipeline():
         try:
             from agent.pipeline import process_jump
+            import traceback as _tb
             branding = CONFIG.get("branding", {}) or {}
-            JOBS_STATE[job_id]["etape"] = "Extraction télémétrie GoPro"
-            JOBS_STATE[job_id]["progression"] = 10
+            _update_job(job_id, etape="Extraction télémétrie GoPro",
+                         progression=10)
 
             logo = branding.get("logo")
             logo_path = BASE_DIR / logo if logo else None
@@ -228,18 +246,18 @@ def api_nouveau_saut():
                 music_path=music_path if music_path and music_path.exists() else None,
                 output_dir=BASE_DIR / "output",
             )
-            JOBS_STATE[job_id].update({
-                "statut": result.statut,
-                "etape": "Terminé" if result.statut == "succes" else "Erreur",
-                "progression": 100,
-                "resultat": result.to_dict(),
-            })
+            _update_job(job_id,
+                         statut=result.statut,
+                         etape="Terminé" if result.statut == "succes" else "Erreur",
+                         progression=100,
+                         resultat=result.to_dict())
         except Exception as e:
-            JOBS_STATE[job_id].update({
-                "statut": "echec",
-                "etape": f"Erreur : {e}",
-                "progression": 0,
-            })
+            log.exception("[%s] Pipeline exception non gérée", job_id)
+            _update_job(job_id,
+                         statut="echec",
+                         etape=f"Erreur : {e}",
+                         progression=0,
+                         traceback=_tb.format_exc())
 
     threading.Thread(target=run_pipeline, daemon=True).start()
 
@@ -255,18 +273,40 @@ def api_nouveau_saut():
 
 @app.route("/api/job/<job_id>")
 def api_job_status(job_id: str):
-    """Retourne l'état d'un job en cours."""
-    state = JOBS_STATE.get(job_id)
+    """Retourne l'état d'un job en cours (lecture thread-safe)."""
+    state = _get_job(job_id)
     if not state:
         return jsonify({"erreur": "Job introuvable"}), 404
     return jsonify({"job_id": job_id, **state})
 
 
-@app.route("/output/<path:filename>")
+@app.route("/output/<filename>")
 def output_file(filename: str):
-    """Sert les montages finaux depuis output/."""
-    from flask import send_from_directory
-    return send_from_directory(BASE_DIR / "output", filename)
+    """Sert les montages finaux depuis output/.
+
+    Utilise le converter Flask par défaut (sans path:) pour interdire les
+    slashes et une validation supplémentaire contre path traversal.
+    """
+    from flask import send_from_directory, abort
+
+    # Rejeter toute tentative de path traversal (Windows + Unix)
+    if "/" in filename or "\\" in filename or ".." in filename \
+            or filename.startswith("."):
+        log.warning("Tentative de path traversal bloquée: %r", filename)
+        abort(400)
+
+    target = (BASE_DIR / "output" / filename).resolve()
+    try:
+        target.relative_to((BASE_DIR / "output").resolve())
+    except ValueError:
+        log.warning("Chemin hors du dossier output bloqué: %r", filename)
+        abort(400)
+
+    if not target.is_file():
+        abort(404)
+
+    return send_from_directory(BASE_DIR / "output", filename,
+                                 as_attachment=False)
 
 
 if __name__ == "__main__":
