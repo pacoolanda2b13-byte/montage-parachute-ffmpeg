@@ -153,20 +153,16 @@ def api_demo_jobs():
     return jsonify({"jobs": mock_jobs()})
 
 
+JOBS_STATE: dict = {}
+
+
 @app.route("/api/nouveau-saut", methods=["POST"])
 def api_nouveau_saut():
-    """Enregistre un nouveau saut (mock pour la démo).
-
-    Dans la version finale, cette route :
-      1. Sauvegarde le fichier vidéo dans sources/
-      2. Crée une entrée en base (passager, saut, email, ...)
-      3. Déclenche le pipeline IA (télémétrie → scènes → montage → livraison)
-      4. Retourne l'ID du job pour le suivi temps réel
-    """
+    """Enregistre un nouveau saut + lance le pipeline IA en arrière-plan."""
     from werkzeug.utils import secure_filename
+    import threading
     import uuid
 
-    # Lecture des champs
     prenom = request.form.get("prenom", "").strip()
     nom = request.form.get("nom", "").strip()
     email = request.form.get("email", "").strip()
@@ -177,12 +173,10 @@ def api_nouveau_saut():
     if not (prenom and nom and email and date_saut):
         return jsonify({"erreur": "Champs obligatoires manquants"}), 400
 
-    # Fichier vidéo
     video = request.files.get("video")
     if not video or not video.filename:
         return jsonify({"erreur": "Vidéo manquante"}), 400
 
-    # Sauvegarde dans sources/
     sources_dir = BASE_DIR / "sources"
     sources_dir.mkdir(exist_ok=True)
     job_id = f"job-{uuid.uuid4().hex[:8]}"
@@ -195,19 +189,84 @@ def api_nouveau_saut():
     except Exception as e:
         return jsonify({"erreur": f"Erreur sauvegarde : {e}"}), 500
 
-    # TODO : déclencher le vrai pipeline IA ici (Jalon 1+)
-    return jsonify({
-        "job_id": job_id,
-        "statut": "en_attente",
-        "message": "Saut enregistré. Le pipeline IA sera lancé en Jalon 1+.",
+    # État initial
+    JOBS_STATE[job_id] = {
+        "statut": "en_cours",
+        "etape": "Enregistrement terminé, démarrage pipeline...",
+        "progression": 0,
         "passager": f"{prenom} {nom}",
         "email": email,
         "date_saut": date_saut,
-        "moniteur": moniteur or None,
-        "telephone": telephone or None,
+        "moniteur": moniteur,
+        "fichier_source": safe_name,
+        "taille_mb": round(taille_mb, 1),
+    }
+
+    # Lancer le pipeline en arrière-plan (non-bloquant)
+    def run_pipeline():
+        try:
+            from agent.pipeline import process_jump
+            branding = CONFIG.get("branding", {}) or {}
+            JOBS_STATE[job_id]["etape"] = "Extraction télémétrie GoPro"
+            JOBS_STATE[job_id]["progression"] = 10
+
+            logo = branding.get("logo")
+            logo_path = BASE_DIR / logo if logo else None
+            music_cfg = (CONFIG.get("musique", {}) or {}).get("piste_defaut")
+            music_path = BASE_DIR / music_cfg if music_cfg else None
+
+            result = process_jump(
+                video_path=dest,
+                nom_passager=f"{prenom} {nom}",
+                email_client=email,
+                date_saut=date_saut,
+                job_id=job_id,
+                moniteur=moniteur,
+                dropzone_nom=branding.get("nom", ""),
+                dropzone_site=branding.get("site_web", ""),
+                logo_path=logo_path if logo_path and logo_path.exists() else None,
+                music_path=music_path if music_path and music_path.exists() else None,
+                output_dir=BASE_DIR / "output",
+            )
+            JOBS_STATE[job_id].update({
+                "statut": result.statut,
+                "etape": "Terminé" if result.statut == "succes" else "Erreur",
+                "progression": 100,
+                "resultat": result.to_dict(),
+            })
+        except Exception as e:
+            JOBS_STATE[job_id].update({
+                "statut": "echec",
+                "etape": f"Erreur : {e}",
+                "progression": 0,
+            })
+
+    threading.Thread(target=run_pipeline, daemon=True).start()
+
+    return jsonify({
+        "job_id": job_id,
+        "statut": "en_cours",
+        "message": "Pipeline IA lancé en arrière-plan.",
+        "passager": f"{prenom} {nom}",
         "fichier": safe_name,
         "taille_mb": round(taille_mb, 1),
-    }), 201
+    }), 202
+
+
+@app.route("/api/job/<job_id>")
+def api_job_status(job_id: str):
+    """Retourne l'état d'un job en cours."""
+    state = JOBS_STATE.get(job_id)
+    if not state:
+        return jsonify({"erreur": "Job introuvable"}), 404
+    return jsonify({"job_id": job_id, **state})
+
+
+@app.route("/output/<path:filename>")
+def output_file(filename: str):
+    """Sert les montages finaux depuis output/."""
+    from flask import send_from_directory
+    return send_from_directory(BASE_DIR / "output", filename)
 
 
 if __name__ == "__main__":
