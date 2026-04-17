@@ -1,0 +1,128 @@
+# ====================================================================
+#  SkyDive Pro — Configuration métier
+#  Copier ce fichier en config.yaml et ajuster selon la dropzone
+# ====================================================================
+
+# ─── Branding de la dropzone ─────────────────────────────
+branding:
+  nom: "Skydive Adventure"
+  logo: "assets/branding/logo_dropzone.png"
+  couleur_primaire: "#FF6B00"    # orange
+  couleur_secondaire: "#1A1A2E"  # nuit
+  police_titre: "Montserrat-Black"
+  police_texte: "Montserrat-Regular"
+  site_web: "skydive-adventure.fr"
+  instagram: "@skydive_adventure"
+
+# ─── Paramètres du montage final ─────────────────────────
+montage:
+  duree_cible_secondes: 210      # 3min30
+  duree_min_secondes: 180        # 3min min
+  duree_max_secondes: 270        # 4min30 max
+  format: "16:9"                 # 16:9 (paysage) ou 9:16 (vertical Instagram)
+  resolution: "1920x1080"        # 1920x1080 ou 1080x1920
+  fps: 30
+  preset_encodage: "fast"        # ultrafast/superfast/veryfast/faster/fast/medium/slow
+  crf: 20                        # qualité CPU (lower = better, 18-23 typique)
+
+# ─── Structure narrative (ordre et durée par scène) ──────
+structure:
+  scenes:
+    - nom: briefing
+      duree_cible: 10
+      priorite: 2                # 1=faible, 3=fort
+    - nom: vehicule_embarquement
+      duree_cible: 5
+      priorite: 1
+    - nom: montee_avion
+      duree_cible: 15
+      priorite: 2
+    - nom: sortie_avion
+      duree_cible: 8
+      priorite: 3
+    - nom: chute_libre
+      duree_cible: 60            # le gros morceau
+      priorite: 3
+    - nom: sous_voile
+      duree_cible: 25
+      priorite: 2
+    - nom: atterrissage
+      duree_cible: 12
+      priorite: 3
+    - nom: reaction_emotion
+      duree_cible: 20            # climax émotionnel
+      priorite: 3
+    - nom: interaction_moniteur
+      duree_cible: 15
+      priorite: 3
+
+# ─── Overlays affichés sur la vidéo ──────────────────────
+overlays:
+  afficher_logo: true
+  afficher_nom_passager: true
+  afficher_date_saut: true
+  afficher_altitude_max: true
+  afficher_vitesse_max: true
+  afficher_duree_chute: true
+  afficher_altitude_live: true    # HUD temps réel pendant la chute libre
+  afficher_vitesse_live: true
+  position_hud: "haut_droite"     # haut_gauche / haut_droite / bas_gauche / bas_droite
+
+# ─── Musique ─────────────────────────────────────────────
+musique:
+  piste_defaut: "assets/music/default_track.mp3"
+  volume: 0.35                    # 0-1
+  fade_in_ms: 1500
+  fade_out_ms: 2500
+  sync_sur_beat: true             # cuts alignés sur le rythme
+  ducking_audio_original: true    # baisse la musique quand audio d'origine parle
+
+# ─── Color grading ───────────────────────────────────────
+color_grading:
+  activer: true
+  lut: "assets/luts/cinematic.cube"
+  saturation: 1.15
+  contraste: 1.1
+
+# ─── Stratégie IA ────────────────────────────────────────
+ia:
+  # Ordre de priorité des providers (fallback automatique)
+  providers_ordre:
+    - gemini          # gratuit, priorité
+    - claude          # payant, fallback
+  # Nombre de keyframes analysées par vidéo (limite le coût API)
+  keyframes_par_video: 8
+  keyframes_intervalle_sec: 30
+  # Détection d'émotions (local)
+  emotion_detection:
+    activer: true
+    seuil_confiance: 0.6
+  # Détection d'interaction (local)
+  interaction_detection:
+    activer: true
+    modeles_pose: "mediapipe_pose_full"   # light / full / heavy
+
+# ─── Livraison ───────────────────────────────────────────
+livraison:
+  canaux_actifs:
+    - email
+    - drive
+    # - sms
+  delai_envoi_apres_montage_sec: 30
+  inclure_preview_gif: true
+  inclure_qr_code: true
+
+  email:
+    sujet_template: "🪂 Ton saut est en ligne ! - {nom_passager}"
+    corps_template: "templates/email_livraison.html"
+
+  drive:
+    dossier_racine: "Skydive Pro - Montages"
+    structure_dossiers: "{annee}/{mois}/{date_saut}_{nom_passager}"
+    rendre_public: true            # lien partageable sans connexion
+
+# ─── Rétention & nettoyage ──────────────────────────────
+retention:
+  vider_sources_apres_jours: 7     # supprime les vidéos brutes pour libérer l'espace
+  archiver_montages_apres_jours: 30
+  supprimer_montages_apres_jours: 365

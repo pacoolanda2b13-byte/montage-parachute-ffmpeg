@@ -1,0 +1,7 @@
+# Dépendances minimales pour lancer la démo (serveur + dashboard)
+# Usage : pip install -r requirements-demo.txt
+# Pour la stack complète (IA, ML, vidéo) : pip install -r requirements.txt
+
+flask>=3.0.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1

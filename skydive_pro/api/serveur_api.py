@@ -1,0 +1,163 @@
+"""
+serveur_api.py — SkyDive Pro API (v0 démo)
+
+Serveur Flask minimal pour démontrer l'interface et la vision avant
+l'implémentation des modules IA.
+
+Routes :
+    GET  /                 → Dashboard staff dropzone
+    GET  /sante            → Health-check JSON
+    GET  /api/config       → Config active (branding, scènes, etc.)
+    GET  /api/demo/jobs    → Jobs fictifs pour démo
+    POST /api/upload       → (mock) Upload d'une vidéo brute
+
+Lancement :
+    cd skydive_pro
+    python api/serveur_api.py
+"""
+
+import os
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from flask import Flask, jsonify, render_template
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
+
+try:
+    from dotenv import load_dotenv
+    env_path = BASE_DIR / ".env"
+    if env_path.exists():
+        load_dotenv(env_path)
+except ImportError:
+    print("[warn] python-dotenv non installé — .env ignoré")
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+    print("[warn] pyyaml non installé — config.yaml ignoré")
+
+
+app = Flask(
+    __name__,
+    template_folder=str(BASE_DIR / "ui" / "templates"),
+    static_folder=str(BASE_DIR / "ui" / "static"),
+)
+
+HOST = os.environ.get("FLASK_HOST", "127.0.0.1")
+PORT = int(os.environ.get("FLASK_PORT", 5000))
+DEBUG = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
+
+CONFIG_PATH = BASE_DIR / "config" / "config.yaml"
+CONFIG = {}
+if yaml:
+    cfg_file = CONFIG_PATH if CONFIG_PATH.exists() else CONFIG_PATH.parent / "config.yaml.example"
+    if cfg_file.exists():
+        with open(cfg_file, encoding="utf-8") as f:
+            CONFIG = yaml.safe_load(f) or {}
+
+
+def mock_jobs():
+    """Jobs fictifs pour démontrer le dashboard."""
+    now = datetime.now()
+    return [
+        {
+            "id": "job-001",
+            "passager": "Marie Dubois",
+            "date_saut": (now - timedelta(minutes=15)).strftime("%H:%M"),
+            "statut": "termine",
+            "altitude_max_m": 4050,
+            "vitesse_max_kmh": 212,
+            "duree_chute_s": 58,
+            "email_envoye": True,
+        },
+        {
+            "id": "job-002",
+            "passager": "Paul Martin",
+            "date_saut": (now - timedelta(minutes=8)).strftime("%H:%M"),
+            "statut": "en_cours",
+            "etape": "Détection émotions au sol",
+            "progression": 72,
+        },
+        {
+            "id": "job-003",
+            "passager": "Sarah Leroy",
+            "date_saut": (now - timedelta(minutes=3)).strftime("%H:%M"),
+            "statut": "en_cours",
+            "etape": "Extraction télémétrie GoPro",
+            "progression": 15,
+        },
+        {
+            "id": "job-004",
+            "passager": "Antoine Garcia",
+            "date_saut": (now - timedelta(hours=2)).strftime("%H:%M"),
+            "statut": "termine",
+            "altitude_max_m": 3980,
+            "vitesse_max_kmh": 208,
+            "duree_chute_s": 55,
+            "email_envoye": True,
+        },
+        {
+            "id": "job-005",
+            "passager": "Julie Bernard",
+            "date_saut": (now - timedelta(hours=3)).strftime("%H:%M"),
+            "statut": "termine",
+            "altitude_max_m": 4100,
+            "vitesse_max_kmh": 219,
+            "duree_chute_s": 61,
+            "email_envoye": True,
+        },
+    ]
+
+
+@app.route("/")
+def index():
+    branding = CONFIG.get("branding", {}) or {}
+    scenes = [s["nom"] for s in (CONFIG.get("structure", {}) or {}).get("scenes", [])]
+    return render_template(
+        "dashboard.html",
+        branding=branding,
+        scenes=scenes,
+        jobs=mock_jobs(),
+        version="0.1.0-demo",
+    )
+
+
+@app.route("/sante")
+def sante():
+    import shutil as _sh
+    ffmpeg_ok = _sh.which("ffmpeg") is not None
+    return jsonify({
+        "statut": "ok" if ffmpeg_ok else "degraded",
+        "version": "0.1.0-demo",
+        "ffmpeg": "disponible" if ffmpeg_ok else "introuvable",
+        "config_chargee": bool(CONFIG),
+        "timestamp": datetime.now().isoformat(),
+    })
+
+
+@app.route("/api/config")
+def api_config():
+    return jsonify({
+        "branding": CONFIG.get("branding", {}),
+        "montage": CONFIG.get("montage", {}),
+        "structure_scenes": [s["nom"] for s in (CONFIG.get("structure", {}) or {}).get("scenes", [])],
+    })
+
+
+@app.route("/api/demo/jobs")
+def api_demo_jobs():
+    return jsonify({"jobs": mock_jobs()})
+
+
+if __name__ == "__main__":
+    print("=" * 60)
+    print(f"[SkyDive Pro] Serveur demo")
+    print(f"  Ecoute       : http://{HOST}:{PORT}")
+    print(f"  Dashboard    : http://{HOST}:{PORT}/")
+    print(f"  Health-check : http://{HOST}:{PORT}/sante")
+    print("=" * 60)
+    app.run(host=HOST, port=PORT, debug=DEBUG)

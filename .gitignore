@@ -1,0 +1,51 @@
+# ─── Claude Code / IDE ────────────────────
+.claude/
+.vscode/
+.idea/
+
+# ─── Archives / dumps ─────────────────────
+*.zip
+*.7z
+*.rar
+
+# ─── OS ───────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Python ───────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ─── Secrets ──────────────────────────────
+.env
+*.pem
+*.key
+**/google_credentials.json
+**/*_token.json
+
+# ─── Vidéos / assets lourds ───────────────
+**/sources/*.mp4
+**/sources/*.MP4
+**/sources/*.mov
+**/sources/*.MOV
+**/output/*.mp4
+**/output/*.MP4
+**/logs/*.log
+**/assets/music/*.mp3
+**/assets/music/*.wav
+
+# Mais garder les .gitkeep
+!**/.gitkeep
+
+# ─── Base de données ──────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ─── Config locale ────────────────────────
+skydive_pro/config/config.yaml
