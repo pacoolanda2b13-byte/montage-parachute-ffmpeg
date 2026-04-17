@@ -21,7 +21,7 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -151,6 +151,63 @@ def api_config():
 @app.route("/api/demo/jobs")
 def api_demo_jobs():
     return jsonify({"jobs": mock_jobs()})
+
+
+@app.route("/api/nouveau-saut", methods=["POST"])
+def api_nouveau_saut():
+    """Enregistre un nouveau saut (mock pour la démo).
+
+    Dans la version finale, cette route :
+      1. Sauvegarde le fichier vidéo dans sources/
+      2. Crée une entrée en base (passager, saut, email, ...)
+      3. Déclenche le pipeline IA (télémétrie → scènes → montage → livraison)
+      4. Retourne l'ID du job pour le suivi temps réel
+    """
+    from werkzeug.utils import secure_filename
+    import uuid
+
+    # Lecture des champs
+    prenom = request.form.get("prenom", "").strip()
+    nom = request.form.get("nom", "").strip()
+    email = request.form.get("email", "").strip()
+    date_saut = request.form.get("date_saut", "").strip()
+    moniteur = request.form.get("moniteur", "").strip()
+    telephone = request.form.get("telephone", "").strip()
+
+    if not (prenom and nom and email and date_saut):
+        return jsonify({"erreur": "Champs obligatoires manquants"}), 400
+
+    # Fichier vidéo
+    video = request.files.get("video")
+    if not video or not video.filename:
+        return jsonify({"erreur": "Vidéo manquante"}), 400
+
+    # Sauvegarde dans sources/
+    sources_dir = BASE_DIR / "sources"
+    sources_dir.mkdir(exist_ok=True)
+    job_id = f"job-{uuid.uuid4().hex[:8]}"
+    safe_name = secure_filename(f"{job_id}_{video.filename}")
+    dest = sources_dir / safe_name
+
+    try:
+        video.save(str(dest))
+        taille_mb = dest.stat().st_size / (1024 * 1024)
+    except Exception as e:
+        return jsonify({"erreur": f"Erreur sauvegarde : {e}"}), 500
+
+    # TODO : déclencher le vrai pipeline IA ici (Jalon 1+)
+    return jsonify({
+        "job_id": job_id,
+        "statut": "en_attente",
+        "message": "Saut enregistré. Le pipeline IA sera lancé en Jalon 1+.",
+        "passager": f"{prenom} {nom}",
+        "email": email,
+        "date_saut": date_saut,
+        "moniteur": moniteur or None,
+        "telephone": telephone or None,
+        "fichier": safe_name,
+        "taille_mb": round(taille_mb, 1),
+    }), 201
 
 
 if __name__ == "__main__":
