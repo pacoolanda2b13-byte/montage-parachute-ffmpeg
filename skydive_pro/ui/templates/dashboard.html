@@ -311,6 +311,24 @@
             margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border);
         }
 
+        .tabs {
+            display: flex; gap: 4px; margin-bottom: 12px;
+            background: var(--bg); padding: 4px; border-radius: 10px;
+            border: 1px solid var(--border);
+        }
+        .tab {
+            flex: 1; padding: 9px 12px; border: none; cursor: pointer;
+            background: transparent; color: var(--text-dim);
+            font-size: 13px; font-weight: 500; border-radius: 7px;
+            transition: all 0.15s; font-family: inherit;
+        }
+        .tab:hover { color: var(--text); }
+        .tab.active {
+            background: var(--bg-card-hover); color: var(--primary);
+        }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+
         .toast {
             position: fixed; bottom: 24px; right: 24px;
             background: var(--bg-card); border: 1px solid var(--success);
@@ -528,13 +546,28 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Vidéo GoPro brute <span class="required">*</span></label>
-                    <label class="file-drop" id="fileDrop">
-                        <div class="file-drop-icon">📹</div>
-                        <div class="file-drop-title" id="fileTitle">Cliquer ou glisser la vidéo ici</div>
-                        <div class="file-drop-hint" id="fileHint">MP4, MOV, max 20 Go — télémétrie GPMF requise</div>
-                        <input type="file" name="video" accept="video/*" id="fileInput" required>
-                    </label>
+                    <label class="form-label">Source vidéo <span class="required">*</span></label>
+                    <div class="tabs">
+                        <button type="button" class="tab active" data-tab="file">📁 Upload fichier</button>
+                        <button type="button" class="tab" data-tab="url">🔗 Lien (WeTransfer / Drive / YouTube...)</button>
+                    </div>
+
+                    <div class="tab-panel active" data-panel="file">
+                        <label class="file-drop" id="fileDrop">
+                            <div class="file-drop-icon">📹</div>
+                            <div class="file-drop-title" id="fileTitle">Cliquer ou glisser la vidéo ici</div>
+                            <div class="file-drop-hint" id="fileHint">MP4, MOV, max 20 Go — télémétrie GPMF si GoPro</div>
+                            <input type="file" name="video" accept="video/*" id="fileInput">
+                        </label>
+                    </div>
+
+                    <div class="tab-panel" data-panel="url">
+                        <input type="url" class="form-input" name="video_url" id="videoUrl"
+                               placeholder="https://we.tl/t-xxx ou https://drive.google.com/... ou YouTube...">
+                        <div class="file-drop-hint" style="margin-top:8px">
+                            Supporté : <b>WeTransfer</b>, <b>Google Drive</b>, <b>Dropbox</b>, <b>YouTube</b>, <b>Vimeo</b>, URL directe .mp4
+                        </div>
+                    </div>
                 </div>
                 <div class="modal-actions">
                     <button type="button" class="btn btn-secondary" onclick="closeModal()">Annuler</button>
@@ -589,14 +622,53 @@
             fileHint.textContent = mb + ' MB · prêt pour analyse télémétrie';
         }
 
+        // ───── Tabs Upload / URL ─────
+        let currentSource = 'file';
+        document.querySelectorAll('.tab').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+                btn.classList.add('active');
+                const tab = btn.dataset.tab;
+                document.querySelector('[data-panel="' + tab + '"]').classList.add('active');
+                currentSource = tab;
+            });
+        });
+
         // ───── Form submit ─────
         async function submitForm(e) {
             e.preventDefault();
             const form = e.target;
-            const data = new FormData(form);
 
             try {
-                const res = await fetch('/api/nouveau-saut', { method: 'POST', body: data });
+                let res;
+                if (currentSource === 'file') {
+                    if (!fileInput.files[0]) {
+                        showToast('✗', 'Aucune vidéo sélectionnée', true);
+                        return;
+                    }
+                    res = await fetch('/api/nouveau-saut', {
+                        method: 'POST', body: new FormData(form),
+                    });
+                } else {
+                    const url = document.getElementById('videoUrl').value.trim();
+                    if (!url) {
+                        showToast('✗', 'URL manquante', true);
+                        return;
+                    }
+                    const payload = {
+                        url,
+                        prenom: form.prenom.value, nom: form.nom.value,
+                        email: form.email.value, date_saut: form.date_saut.value,
+                        moniteur: form.moniteur.value,
+                    };
+                    res = await fetch('/api/import-url', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(payload),
+                    });
+                }
+
                 const json = await res.json();
                 if (res.ok) {
                     showToast('✓', 'Saut enregistré ! Job ' + json.job_id + ' lancé.', false);

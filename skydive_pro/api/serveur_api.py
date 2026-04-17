@@ -271,6 +271,97 @@ def api_nouveau_saut():
     }), 202
 
 
+@app.route("/api/import-url", methods=["POST"])
+def api_import_url():
+    """Télécharge une vidéo depuis une URL (YouTube, WeTransfer, Drive, Dropbox, direct)
+    puis lance le pipeline IA."""
+    from werkzeug.utils import secure_filename
+    import threading
+    import uuid
+
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    prenom = (data.get("prenom") or "").strip()
+    nom = (data.get("nom") or "").strip()
+    email = (data.get("email") or "").strip()
+    date_saut = (data.get("date_saut") or "").strip()
+    moniteur = (data.get("moniteur") or "").strip()
+
+    if not url:
+        return jsonify({"erreur": "URL manquante"}), 400
+    if not (prenom and nom and email and date_saut):
+        return jsonify({"erreur": "Champs obligatoires manquants (prenom/nom/email/date_saut)"}), 400
+
+    sources_dir = BASE_DIR / "sources"
+    sources_dir.mkdir(exist_ok=True)
+    job_id = f"job-{uuid.uuid4().hex[:8]}"
+
+    _update_job(job_id,
+                 statut="en_cours",
+                 etape="Téléchargement de la vidéo depuis l'URL...",
+                 progression=5,
+                 passager=f"{prenom} {nom}",
+                 email=email,
+                 date_saut=date_saut,
+                 moniteur=moniteur,
+                 source_url=url)
+
+    def run_import_and_pipeline():
+        import traceback as _tb
+        try:
+            from core.url_importer import import_from_url
+            from agent.pipeline import process_jump
+
+            safe_name = secure_filename(f"{job_id}_saut")
+            imp = import_from_url(url, sources_dir, nom_fichier=safe_name)
+
+            _update_job(job_id, etape=f"Téléchargé ({imp.taille_mb:.1f} MB) — démarrage IA...",
+                         progression=15,
+                         fichier_source=imp.path.name,
+                         taille_mb=round(imp.taille_mb, 1),
+                         source_type=imp.source)
+
+            branding = CONFIG.get("branding", {}) or {}
+            logo = branding.get("logo")
+            logo_path = BASE_DIR / logo if logo else None
+            music_cfg = (CONFIG.get("musique", {}) or {}).get("piste_defaut")
+            music_path = BASE_DIR / music_cfg if music_cfg else None
+
+            result = process_jump(
+                video_path=imp.path,
+                nom_passager=f"{prenom} {nom}",
+                email_client=email,
+                date_saut=date_saut,
+                job_id=job_id,
+                moniteur=moniteur,
+                dropzone_nom=branding.get("nom", ""),
+                dropzone_site=branding.get("site_web", ""),
+                logo_path=logo_path if logo_path and logo_path.exists() else None,
+                music_path=music_path if music_path and music_path.exists() else None,
+                output_dir=BASE_DIR / "output",
+            )
+            _update_job(job_id,
+                         statut=result.statut,
+                         etape="Terminé" if result.statut == "succes" else "Erreur",
+                         progression=100,
+                         resultat=result.to_dict())
+        except Exception as e:
+            log.exception("[%s] Import+Pipeline exception", job_id)
+            _update_job(job_id,
+                         statut="echec",
+                         etape=f"Erreur : {e}",
+                         progression=0,
+                         traceback=_tb.format_exc())
+
+    threading.Thread(target=run_import_and_pipeline, daemon=True).start()
+
+    return jsonify({
+        "job_id": job_id,
+        "statut": "en_cours",
+        "message": "Téléchargement et pipeline lancés en arrière-plan.",
+    }), 202
+
+
 @app.route("/api/job/<job_id>")
 def api_job_status(job_id: str):
     """Retourne l'état d'un job en cours (lecture thread-safe)."""
