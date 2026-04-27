@@ -43,6 +43,16 @@ log = get_logger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Charger .env en mode CLI (le serveur Flask le fait deja de son cote).
+# Sans ca, GEMINI_API_KEY n'est pas lue et la vision est desactivee.
+try:
+    from dotenv import load_dotenv
+    env_file = BASE_DIR / ".env"
+    if env_file.exists():
+        load_dotenv(env_file)
+except ImportError:
+    pass
+
 
 @dataclass
 class PipelineResult:

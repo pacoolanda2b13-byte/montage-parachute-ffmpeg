@@ -167,17 +167,35 @@ def _mix_music(video_path: Path, music_path: Path, out_path: Path,
 # ══════════════════════════════════════════════════════════════
 #  Sélection des meilleurs moments par scène
 # ══════════════════════════════════════════════════════════════
-# Durée cible par scène (en secondes) — total ≈ 3m30
+# Durée cible par scène (en secondes) — total ≈ 3m
+# Priorité client : plus de chute libre, ouverture du parachute visible,
+# vraie sortie d'avion et vrai atterrissage.
 SCENE_DURATIONS_CIBLE = {
-    "briefing": 8,
-    "vehicule_embarquement": 4,
-    "montee_avion": 10,
-    "sortie_avion": 5,
-    "chute_libre": 50,
-    "sous_voile": 20,
-    "atterrissage": 10,
-    "reaction_emotion": 18,
-    "interaction_moniteur": 15,
+    "briefing": 6,
+    "vehicule_embarquement": 3,
+    "montee_avion": 8,
+    "sortie_avion": 12,       # +7s : bien voir le saut hors avion
+    "chute_libre": 75,        # +25s : le moment phare
+    "sous_voile": 12,         # -8s : moins de plané, on prend le DEBUT
+    "atterrissage": 18,       # +8s : voir l'arrive au sol
+    "reaction_emotion": 15,
+    "interaction_moniteur": 12,
+}
+
+# Ou extraire le clip dans le segment source :
+#   "start"  -> prendre les premieres secondes (capture le debut du moment)
+#   "middle" -> prendre le milieu (moment moyen)
+#   "end"    -> prendre la fin (capture la conclusion du moment)
+SCENE_CLIP_POSITION = {
+    "sortie_avion":   "start",  # saut hors avion = debut du segment
+    "sous_voile":     "start",  # ouverture du parachute = debut du segment
+    "atterrissage":   "end",    # touche du sol = fin du segment
+    "chute_libre":    "middle",
+    "briefing":       "middle",
+    "vehicule_embarquement": "middle",
+    "montee_avion":   "middle",
+    "reaction_emotion": "middle",
+    "interaction_moniteur": "middle",
 }
 
 
@@ -216,14 +234,21 @@ def select_best_clips(segments: list[dict],
             out.append({"start_s": seg_start,
                         "end_s": seg_end, "scene": scene})
         else:
-            # Prendre le milieu, clampé à [0, seg_end]
-            mid = (seg_start + seg_end) / 2
-            half = target / 2
-            new_start = max(0.0, mid - half)
-            new_end = min(seg_end, new_start + target)
-            # Si on a rogné à gauche, décale à gauche pour garder target secs
-            if new_end - new_start < target:
-                new_start = max(0.0, new_end - target)
+            pos = SCENE_CLIP_POSITION.get(scene, "middle")
+            if pos == "start":
+                new_start = seg_start
+                new_end = seg_start + target
+            elif pos == "end":
+                new_end = seg_end
+                new_start = max(seg_start, seg_end - target)
+            else:  # middle
+                mid = (seg_start + seg_end) / 2
+                half = target / 2
+                new_start = max(0.0, mid - half)
+                new_end = min(seg_end, new_start + target)
+                # Si on a rogné à gauche, décale à gauche pour garder target secs
+                if new_end - new_start < target:
+                    new_start = max(0.0, new_end - target)
             out.append({"start_s": new_start, "end_s": new_end, "scene": scene})
     return out
 

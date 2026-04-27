@@ -506,6 +506,32 @@ def detect_scenes(video_path: str | Path,
     # 4. Fusion
     fused = merge_signals(telemetry_segs, audio_segs, vision_segs)
 
+    # 5. Fallback narratif : si la fusion ne donne pas au moins 4 scenes
+    # distinctes identifiees, on decoupe la video proportionnellement selon
+    # la structure typique d'un saut tandem. Garantit un montage coherent
+    # meme si GPS off + Gemini quota-KO.
+    fallback_used = False
+    identified_scenes = {s.scene for s in fused}
+    if len(identified_scenes) < 4:
+        duration_s = (samples[-1].time_s if samples else None)
+        if duration_s is None or duration_s <= 0:
+            # Fallback duree via ffprobe
+            try:
+                res = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries",
+                     "format=duration", "-of", "csv=p=0", str(video_path)],
+                    capture_output=True, text=True, check=True, timeout=10,
+                )
+                duration_s = float(res.stdout.strip())
+            except Exception:
+                duration_s = 0
+        if duration_s > 30:
+            fused = _build_narrative_fallback(duration_s)
+            fallback_used = True
+            log.warning("Fallback narratif active (%.0fs, %d segments) "
+                         "- telemetrie/vision insuffisantes",
+                         duration_s, len(fused))
+
     return {
         "segments": [asdict(s) for s in fused],
         "stats": {
@@ -518,8 +544,43 @@ def detect_scenes(video_path: str | Path,
             "audio_disponible": audio_result.get("disponible", False),
             "audio_raison": audio_result.get("raison"),
             "vision_activee": use_vision,
+            "fallback_narratif_active": fallback_used,
         }
     }
+
+
+# Proportions narratives d'un saut tandem typique (doit sommer a 1.0)
+_NARRATIVE_STRUCTURE = [
+    ("briefing",              0.10),
+    ("vehicule_embarquement", 0.08),
+    ("montee_avion",          0.15),
+    ("sortie_avion",          0.05),
+    ("chute_libre",           0.20),
+    ("sous_voile",            0.22),
+    ("atterrissage",          0.08),
+    ("reaction_emotion",      0.07),
+    ("interaction_moniteur",  0.05),
+]
+
+
+def _build_narrative_fallback(duration_s: float) -> list[SceneSegment]:
+    """Decoupe naif proportionnel : attribue a chaque phase un segment
+    temporel base sur la structure typique d'un saut tandem.
+
+    Utile quand la detection automatique (telemetrie + vision) echoue.
+    """
+    segs: list[SceneSegment] = []
+    cursor = 0.0
+    for scene, ratio in _NARRATIVE_STRUCTURE:
+        seg_dur = duration_s * ratio
+        start = cursor
+        end = min(duration_s, cursor + seg_dur)
+        segs.append(SceneSegment(
+            scene=scene, start_s=round(start, 2), end_s=round(end, 2),
+            confiance=0.3, source="fallback_narratif",
+        ))
+        cursor = end
+    return segs
 
 
 if __name__ == "__main__":
