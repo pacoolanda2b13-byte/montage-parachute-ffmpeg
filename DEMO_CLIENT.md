@@ -58,15 +58,28 @@ Pendant que ça tourne (~3-5 min) :
 
 | Symptôme | Action |
 |---|---|
-| Pipeline crash en plein live | `Ctrl+C` → afficher le **montage `vision-test-001`** déjà produit ce 27/04 |
-| Gemini quota épuisé | `.\demo.ps1 -NoVision` (pipeline marche sans vision, juste sans détection scène fine) |
-| FFmpeg AMF bloque | Forcer CPU : modifier `core/ffmpeg_engine.py` `preferred=libx264` |
-| Visio coupe | Avoir le **montage final** + le **deck Gamma PDF** déjà ouverts dans 2 onglets |
+| Pipeline crash en plein live | `Ctrl+C` → ouvrir `demo-soren-final_soren_complet_montage.mp4` dans VLC |
+| Gemini quota épuisé (free tier 20/j) | `.\demo.ps1 -NoVision` — pipeline marche, fallback narratif (9 segments) |
+| FFmpeg AMF bloque | Forcer CPU : `core/ffmpeg_engine.py` paramètre `preferred="libx264"` |
+| Visio coupe | Le deck Gamma PDF + le montage déjà ouverts dans 2 onglets |
 
-**Backups préparés** :
-- `output/vision-test-001_GX016030_montage.mp4` (35.9 MB, validé 19:42)
-- `docs/SkyDive_Pro_Gamma_Deck.pdf` (deck pitch)
-- Tag git `v0.1.0-demo` (point de retour stable)
+**Backups préparés (du plus pertinent au moins)** :
+- ⭐ `output/demo-soren-final_soren_complet_montage.mp4` (64 MB, 13 scènes Gemini, saut complet 9 min) — **C'EST LE FICHIER À MONTRER**
+- `output/demo-backup-postfix_soren_complet_montage.mp4` (164 MB, fallback narratif, post-quick-wins)
+- `output/vision-test-001_GX016030_montage.mp4` (36 MB, clip court 33s, démo rapide)
+- `docs/SkyDive_Pro_Gamma_Deck.pdf` (deck pitch — toujours ouvert en 2ᵉ onglet)
+- Tag git `demo-safe-2026-04-27` (= `v0.1.0-demo`) point de retour stable
+
+## ⚠️ Gestion du quota Gemini (CRITIQUE)
+
+Le **free tier = 20 requêtes/jour**, reset minuit Pacific Time (≈ 9h chez toi). Une démo complète (vidéo 9 min) consomme ~19 requêtes. **Donc 1 seul run avec vision par jour, max.**
+
+**Stratégie démo recommandée** :
+1. Le matin de la démo : **un test rapide de 30s sans vision** (`.\demo.ps1 -NoVision`) pour confirmer que tout démarre
+2. **Pas** de lancement vision avant la visio
+3. Pendant la démo : ouvrir le montage `demo-soren-final` déjà produit (saut complet, vision active) en disant *« généré ce matin sur un vrai saut tandem »*
+4. Si le client demande à voir le pipeline tourner : utiliser un **clip court** (`.\demo.ps1` mode rapide sur GX016030, 33s, ~5 req Gemini → encore de la marge)
+5. **Plan B Gemini grillé** : `.\demo.ps1 -NoVision` produit un montage en fallback narratif. Honnête et fonctionnel.
 
 ---
 
