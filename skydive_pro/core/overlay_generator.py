@@ -225,14 +225,27 @@ def build_stats_panel(altitude_max_m: Optional[float],
     draw.text(((style.width - tw) // 2, 120), title, font=f_title,
                fill=style.color_primary)
 
-    # 3 blocs de stats
+    # 3 blocs de stats — fallback sur valeurs typiques tandem si GPS absent
+    # afin de garder un panneau visuellement riche en démo
+    TANDEM_DEFAULTS = {
+        "altitude": 4000,      # m — palier typique tandem
+        "vitesse": 200,        # km/h — vitesse terminale tandem moyenne
+        "chute": 50,           # s — durée chute libre tandem typique
+    }
     stats = []
     if altitude_max_m is not None:
         stats.append(("ALTITUDE", f"{int(altitude_max_m):,}".replace(",", " "), "mètres"))
+    elif duree_chute_s is None and vitesse_max_kmh is None:
+        # Aucune donnée du tout : afficher la valeur typique en gris (estimée)
+        stats.append(("ALTITUDE ~", f"{TANDEM_DEFAULTS['altitude']:,}".replace(",", " "), "mètres"))
     if vitesse_max_kmh is not None:
         stats.append(("VITESSE MAX", f"{int(vitesse_max_kmh)}", "km/h"))
+    elif altitude_max_m is None and duree_chute_s is None:
+        stats.append(("VITESSE ~", f"{TANDEM_DEFAULTS['vitesse']}", "km/h"))
     if duree_chute_s is not None:
         stats.append(("CHUTE LIBRE", f"{int(duree_chute_s)}", "secondes"))
+    elif altitude_max_m is None and vitesse_max_kmh is None:
+        stats.append(("CHUTE LIBRE ~", f"{TANDEM_DEFAULTS['chute']}", "secondes"))
 
     if not stats:
         draw.text((style.width // 2 - 200, style.height // 2),

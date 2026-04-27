@@ -55,3 +55,21 @@ env/
 
 # ─── Config locale ────────────────────────
 skydive_pro/config/config.yaml
+
+# ─── Artifacts ad-hoc générés en local ────
+skydive_pro/bench_results_*.json
+skydive_pro/output/*.pdf
+skydive_pro/output/generate_*.py
+skydive_pro/scripts/build_*.py
+skydive_pro/scripts/concat_clips.py
+skydive_pro/tests/wetransfer_*/
+
+# ─── Assets binaires (à versionner via Git LFS si besoin) ──
+skydive_pro/assets/branding/*.png
+skydive_pro/assets/branding/*.jpg
+skydive_pro/assets/music/*.m4a
+
+# ─── Logs run démo ─────────────────────────
+skydive_pro/output/demo_*_run.log
+skydive_pro/output/*.mp4.log
+

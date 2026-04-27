@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [master, "feat/**", "chore/**"]
+  pull_request:
+    branches: [master]
+
+jobs:
+  lint-and-syntax:
+    name: Lint & syntax check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dev tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      - name: Ruff lint (errors only)
+        run: ruff check skydive_pro/ --select E,F,W --ignore E501
+
+      - name: Python syntax check
+        run: |
+          python -m compileall -q skydive_pro/
+
+  imports-and-smoke:
+    name: Imports + smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install FFmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r skydive_pro/requirements-demo.txt
+          pip install python-dotenv pyyaml pydantic numpy Pillow
+
+      - name: Verify package importable
+        working-directory: skydive_pro
+        run: |
+          python -c "import sys; sys.path.insert(0, '.'); from agent.pipeline import process_jump; from core.ffmpeg_engine import build_montage; from core.telemetry_gopro import extract_telemetry; print('All imports OK')"

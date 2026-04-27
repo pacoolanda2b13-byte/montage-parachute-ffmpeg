@@ -1,0 +1,46 @@
+SkyDive Pro — Logiciel propriétaire
+Copyright (c) 2026 Paco Olanda. Tous droits réservés.
+
+Le présent logiciel et l'ensemble des fichiers source, documentation, ressources
+graphiques, modèles entraînés et fichiers de configuration associés (collectivement,
+le « Logiciel ») sont la propriété exclusive de Paco Olanda (ci-après « le Titulaire »).
+
+1. CONFIDENTIALITÉ ET RÉSERVE DE DROITS
+   Tous les droits non explicitement accordés par écrit par le Titulaire sont
+   strictement réservés. Aucune licence, expresse ou implicite, n'est concédée
+   par la mise à disposition publique du dépôt source.
+
+2. INTERDICTIONS
+   Sauf autorisation écrite préalable du Titulaire, il est strictement interdit de :
+   - copier, reproduire, distribuer, publier ou rendre disponible publiquement
+     tout ou partie du Logiciel ;
+   - modifier, adapter, traduire, fusionner ou créer des œuvres dérivées ;
+   - exploiter le Logiciel à des fins commerciales ;
+   - décompiler, désassembler, faire de l'ingénierie inverse au-delà des limites
+     prévues par les dispositions légales impératives applicables ;
+   - sous-licencier, louer, prêter ou céder le Logiciel à un tiers.
+
+3. USAGES AUTORISÉS
+   Sont autorisés sans accord préalable :
+   - la consultation du code source publiquement publié à des fins d'évaluation
+     personnelle et non commerciale ;
+   - le rapport de vulnérabilités au Titulaire.
+
+4. CLIENTS COMMERCIAUX
+   Tout déploiement, exploitation ou usage commercial du Logiciel est conditionné
+   à la signature préalable d'un contrat de licence commerciale séparé entre le
+   client et le Titulaire.
+
+5. ABSENCE DE GARANTIE
+   Le Logiciel est fourni « EN L'ÉTAT » (AS IS), sans aucune garantie de
+   performance, d'absence de défauts, d'adéquation à un usage particulier ou
+   de non-contrefaçon. Le Titulaire ne pourra en aucun cas être tenu responsable
+   des dommages directs, indirects, spéciaux ou consécutifs résultant de
+   l'utilisation ou de l'impossibilité d'utiliser le Logiciel.
+
+6. DROIT APPLICABLE
+   Le présent contrat est régi par le droit français. Tout litige relatif à son
+   interprétation ou à son exécution relève de la compétence exclusive des
+   tribunaux du ressort du Titulaire.
+
+Pour toute demande de licence, contact : pacoolanda2b13@gmail.com

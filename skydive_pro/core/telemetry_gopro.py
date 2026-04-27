@@ -301,15 +301,15 @@ def extract_telemetry(video_path: str | Path) -> list[TelemetrySample]:
                     n = len(pts)
                     for i, pt in enumerate(pts):
                         lat, lon, alt, spd2d, spd3d = (pt + (0, 0, 0, 0, 0))[:5]
+                        # Garde par champ : on tolère qu'un scale=0 invalide
+                        # uniquement le champ correspondant (ex: GPS partiel)
                         if scale and len(scale) >= 5:
                             s_lat, s_lon, s_alt, s_spd2d, s_spd3d = scale[:5]
-                            # Garde stricte contre ZeroDivisionError (GPS non fixé)
-                            if not all((s_lat, s_lon, s_alt, s_spd2d, s_spd3d)):
-                                continue
-                            lat, lon = lat / s_lat, lon / s_lon
-                            alt = alt / s_alt
-                            spd2d = spd2d / s_spd2d
-                            spd3d = spd3d / s_spd3d
+                            lat = (lat / s_lat) if s_lat else None
+                            lon = (lon / s_lon) if s_lon else None
+                            alt = (alt / s_alt) if s_alt else None
+                            spd2d = (spd2d / s_spd2d) if s_spd2d else None
+                            spd3d = (spd3d / s_spd3d) if s_spd3d else None
                         t = devc_time_start + (i / n)
                         samples.append(TelemetrySample(
                             time_s=t, lat=lat, lon=lon,

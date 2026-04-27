@@ -122,8 +122,15 @@ def process_jump(video_path: str | Path,
             samples = extract_telemetry(video_path)
             analysis = analyze_skydive(samples)
             result.analyse_telemetrie = analysis.to_dict()
-            result.ajouter_etape("telemetrie", _timer() - t, True,
-                                  f"{len(samples)} samples, alt_max={analysis.altitude_max_m}")
+            stats = analysis.to_dict().get("stats", {}) or {}
+            n_gps = stats.get("nb_samples_gps", 0)
+            n_accl = stats.get("nb_samples_accl", 0)
+            result.ajouter_etape(
+                "telemetrie", _timer() - t, True,
+                f"{len(samples)} samples (GPS={n_gps}, ACCL={n_accl}), "
+                f"alt_max={analysis.altitude_max_m}, "
+                f"v_max={analysis.vitesse_max_kmh}",
+            )
         except RuntimeError as e:
             # ffprobe/ffmpeg absent : erreur bloquante
             log.error("[%s] Télémétrie bloquante: %s", job_id, e)

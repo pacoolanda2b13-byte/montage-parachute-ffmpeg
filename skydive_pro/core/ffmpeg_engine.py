@@ -143,24 +143,58 @@ def _concat_clips(clips: list[Path], out_path: Path, encoder: str) -> Path:
     return out_path
 
 
+def _has_audio_stream(video_path: Path) -> bool:
+    """Vrai si la vidéo contient au moins une piste audio."""
+    _, ffprobe = _find_ffmpeg()
+    cmd = [ffprobe, "-v", "error", "-select_streams", "a",
+           "-show_entries", "stream=codec_type", "-of", "csv=p=0",
+           str(video_path)]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        return "audio" in r.stdout
+    except subprocess.CalledProcessError:
+        return False
+
+
 def _mix_music(video_path: Path, music_path: Path, out_path: Path,
                 music_volume: float = 0.35, encoder: str = "libx264") -> Path:
-    """Mixe une piste musicale par-dessus le son original de la vidéo."""
+    """Mixe une piste musicale par-dessus le son original de la vidéo.
+
+    Si la vidéo source n'a pas d'audio (cas des montages composés uniquement
+    de stills), la musique est simplement collée sans amix → évite le crash
+    « Invalid stream specifier » de FFmpeg.
+    """
     ffmpeg, _ = _find_ffmpeg()
+    has_audio = _has_audio_stream(video_path)
+
+    if has_audio:
+        filter_complex = (
+            f"[1:a]volume={music_volume}[music];"
+            f"[0:a][music]amix=inputs=2:duration=first:dropout_transition=3[aout]"
+        )
+        map_audio = ["-map", "[aout]"]
+    else:
+        # Pas de piste audio dans la vidéo : on prend juste la musique
+        filter_complex = f"[1:a]volume=1.0[aout]"
+        map_audio = ["-map", "[aout]"]
+
     cmd = [
         ffmpeg, "-y", "-v", "error",
         "-i", str(video_path),
         "-stream_loop", "-1", "-i", str(music_path),
-        "-filter_complex",
-        f"[1:a]volume={music_volume}[music];"
-        f"[0:a][music]amix=inputs=2:duration=first:dropout_transition=3[aout]",
-        "-map", "0:v", "-map", "[aout]",
+        "-filter_complex", filter_complex,
+        "-map", "0:v", *map_audio,
         "-c:v", "copy",  # re-copie la vidéo (pas besoin de ré-encoder)
         "-c:a", "aac", "-b:a", "192k",
         "-shortest", "-movflags", "+faststart",
         str(out_path),
     ]
-    subprocess.run(cmd, check=True, capture_output=True)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        # Fallback ultime : copier la vidéo sans musique
+        import shutil as _sh
+        _sh.copy(str(video_path), str(out_path))
     return out_path
 
 
