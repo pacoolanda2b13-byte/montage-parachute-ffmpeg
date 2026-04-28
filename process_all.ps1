@@ -240,8 +240,13 @@ _s.exit(0 if r.statut == 'succes' else 1)
 
     Push-Location $ProjectDir
     try {
-        & $VenvPython -c $script
-        return $LASTEXITCODE
+        # Out-Host : affiche le stdout Python directement au terminal,
+        # sans le faire remonter dans la valeur de retour PowerShell
+        # (sinon $exitCode = "STATUT: succes\n0" au lieu de juste 0)
+        & $VenvPython -c $script | Out-Host
+        $code = $LASTEXITCODE
+        if ($null -eq $code) { $code = -1 }
+        return [int]$code
     } finally {
         Pop-Location
     }
