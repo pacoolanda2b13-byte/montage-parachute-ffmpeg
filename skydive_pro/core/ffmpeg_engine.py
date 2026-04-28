@@ -277,34 +277,35 @@ SCENE_SUBDIVIDE = {
 }
 
 
-def _resolve_overlaps(clips: list[dict], min_gap_s: float = 0.0) -> list[dict]:
-    """Resout les chevauchements temporels entre clips selectionnes.
+def _resolve_overlaps(clips: list[dict], overlap_threshold: float = 5.0
+                       ) -> list[dict]:
+    """Resout les chevauchements temporels MAJEURS entre clips.
 
-    Strategie : pour chaque paire adjacente (apres tri par start_s), si
-    le clip A se termine apres le debut du clip B, on tronque A. La
-    scene avec la plus haute priorite (climax) garde priorite, mais
-    par defaut on coupe le clip precedent (chronologique).
+    Ne coupe que si l'overlap est >= overlap_threshold secondes.
+    Sinon, on accepte les petits chevauchements (transitions cinema OK).
 
-    Garantit qu'aucune image source n'apparait 2 fois dans le montage.
+    Cette logique evite que `_resolve_overlaps` ne mange des scenes
+    entieres a cause d'un chevauchement de quelques secondes.
     """
     if len(clips) < 2:
         return clips
-    sorted_clips = sorted(clips, key=lambda c: c["start_s"])
-    resolved = [dict(sorted_clips[0])]
-    for c in sorted_clips[1:]:
+    # Conserver l'ordre narratif d'origine (selon SCENE order)
+    # On ne tri PAS par start_s pour preserver l'ordre de scene.
+    resolved = [dict(clips[0])]
+    for c in clips[1:]:
         prev = resolved[-1]
-        # Chevauchement detecte
-        if c["start_s"] < prev["end_s"]:
-            # Tronquer le precedent pour qu'il s'arrete au start du suivant
-            new_prev_end = c["start_s"] - min_gap_s
-            if new_prev_end > prev["start_s"] + 0.5:  # garde au moins 0.5s
+        # Chevauchement detecte uniquement si c.start < prev.end
+        # ET overlap est consequent (>= overlap_threshold secs)
+        overlap = prev["end_s"] - c["start_s"]
+        if overlap >= overlap_threshold:
+            # Tronquer le precedent juste avant le suivant
+            new_prev_end = c["start_s"]
+            if new_prev_end > prev["start_s"] + 1.0:  # garde >= 1s
                 prev["end_s"] = new_prev_end
-            else:
-                # Le precedent est trop court -> on le supprime
-                resolved.pop()
+        # Sinon : on accepte le petit chevauchement (= transition fluide)
         resolved.append(dict(c))
-    # Filter out clips ridiculement courts
-    return [c for c in resolved if (c["end_s"] - c["start_s"]) >= 0.5]
+    # Filter out clips trop courts
+    return [c for c in resolved if (c["end_s"] - c["start_s"]) >= 1.0]
 
 
 def _merge_adjacent(segments: list[dict], gap_s: float = 5.0) -> list[dict]:
@@ -408,48 +409,112 @@ def select_best_clips(segments: list[dict],
         if scene in order:
             by_scene.setdefault(scene, []).append(seg)
 
-    # ─── Fallback positionnel : briefing/embarquement depuis le debut ───
-    # Probleme observe : Gemini classe souvent les frames du briefing comme
-    # "montee_avion" car elles sont au sol dans une zone de saut. On detecte
-    # un "gros" montee_avion (>40s) au debut de la video et on le decoupe.
+    # ─── Fallback positionnel intelligent ───
+    # Probleme observe : Gemini (surtout flash-lite) classifie souvent
+    # les 100+ premieres secondes en "montee_avion" alors qu'il y a
+    # briefing + embarquement + interieur cabine + paysages.
+    # Si on detecte un GROS segment "montee_avion" au debut, on le
+    # subdivise en proportion en utilisant les durees cibles.
     if "montee_avion" in by_scene:
         big_montee = max(by_scene["montee_avion"],
                           key=lambda s: s["end_s"] - s["start_s"])
         big_dur = big_montee["end_s"] - big_montee["start_s"]
-        # Si la "montee_avion" detectee couvre les 40+ premieres secondes,
-        # on la subdivise en briefing/embarquement/montee
-        if big_dur >= 40 and big_montee["start_s"] < 30:
+        # Seuil : segment >= 60s au debut de la video
+        if big_dur >= 60 and big_montee["start_s"] < 30:
             seg_start = big_montee["start_s"]
             seg_end = big_montee["end_s"]
+            cursor = seg_start
 
-            # Briefing : tout debut
+            # Briefing : tout debut (target 10s)
             if not by_scene.get("briefing"):
-                briefing_dur = min(durations.get("briefing", 8),
-                                    big_dur * 0.20)
+                d = durations.get("briefing", 10)
                 by_scene["briefing"] = [{
-                    "start_s": seg_start,
-                    "end_s": seg_start + briefing_dur,
+                    "start_s": cursor, "end_s": cursor + d,
                     "scene": "briefing",
                 }]
+            cursor += durations.get("briefing", 10)
 
-            # Embarquement : juste apres
+            # Embarquement (target 5s)
             if not by_scene.get("vehicule_embarquement"):
-                emb_start = seg_start + (durations.get("briefing", 8))
-                emb_dur = durations.get("vehicule_embarquement", 5)
+                d = durations.get("vehicule_embarquement", 5)
                 by_scene["vehicule_embarquement"] = [{
-                    "start_s": emb_start,
-                    "end_s": emb_start + emb_dur,
+                    "start_s": cursor, "end_s": cursor + d,
                     "scene": "vehicule_embarquement",
                 }]
+            cursor += durations.get("vehicule_embarquement", 5)
 
-            # Montee avion vraie : derniers X secondes avant sortie
-            montee_dur = durations.get("montee_avion", 10)
-            new_montee_start = max(seg_start, seg_end - montee_dur)
+            # Dans l'avion : interieur cabine (target 10s)
+            if not by_scene.get("dans_avion"):
+                d = durations.get("dans_avion", 10)
+                by_scene["dans_avion"] = [{
+                    "start_s": cursor, "end_s": cursor + d,
+                    "scene": "dans_avion",
+                }]
+            cursor += durations.get("dans_avion", 10)
+
+            # Paysage avion : vue hublot (target 30s) — la VRAIE valeur
+            # ajoutee de SkyDive Pro pour ce client
+            if not by_scene.get("paysage_avion"):
+                d = durations.get("paysage_avion", 30)
+                # On reserve la fin du gros segment pour la "montee" finale
+                paysage_end = min(seg_end - 5, cursor + d)
+                if paysage_end > cursor + 5:  # au moins 5s de paysage
+                    by_scene["paysage_avion"] = [{
+                        "start_s": cursor, "end_s": paysage_end,
+                        "scene": "paysage_avion",
+                    }]
+                    cursor = paysage_end
+
+            # Montee avion : derniers 5s avant la sortie
+            montee_dur = durations.get("montee_avion", 5)
+            new_montee_start = max(cursor, seg_end - montee_dur)
             by_scene["montee_avion"] = [{
-                "start_s": new_montee_start,
-                "end_s": seg_end,
+                "start_s": new_montee_start, "end_s": seg_end,
                 "scene": "montee_avion",
             }]
+
+    # ─── Fallback : extraire sortie_avion depuis le debut de chute_libre ───
+    # Probleme observe : Gemini fusionne souvent "sortie_avion" avec
+    # "chute_libre" (la sortie est tres breve visuellement).
+    if not by_scene.get("sortie_avion") and by_scene.get("chute_libre"):
+        first_chute = min(by_scene["chute_libre"],
+                           key=lambda s: s["start_s"])
+        sortie_dur = durations.get("sortie_avion", 30)
+        sortie_start = max(0.0, first_chute["start_s"] - sortie_dur)
+        by_scene["sortie_avion"] = [{
+            "start_s": sortie_start,
+            "end_s": first_chute["start_s"],
+            "scene": "sortie_avion",
+        }]
+
+    # ─── Fallback : sous_voile -> chute_libre + atterrissage ───
+    # Probleme observe : Gemini-flash-lite classifie 70%+ de la video en
+    # sous_voile (de la fin de chute libre jusqu'a l'atterrissage).
+    # Si chute_libre est tres courte (<30s) mais sous_voile gigantesque
+    # (>120s), on suspecte cette confusion et on reattribue le 1er tiers
+    # de sous_voile a chute_libre.
+    sous_voile_segs = by_scene.get("sous_voile", [])
+    chute_segs = by_scene.get("chute_libre", [])
+    chute_total = sum(s["end_s"] - s["start_s"] for s in chute_segs)
+    sous_total = sum(s["end_s"] - s["start_s"] for s in sous_voile_segs)
+    if sous_total > 120 and chute_total < 40 and sous_voile_segs:
+        # Recuperer les 1ers segments sous_voile contigus pour augmenter chute
+        sv_sorted = sorted(sous_voile_segs, key=lambda s: s["start_s"])
+        recover_dur = min(60.0, sous_total / 3)
+        recovered = []
+        accumulated = 0
+        for sv in sv_sorted:
+            if accumulated >= recover_dur:
+                break
+            sv_dur = sv["end_s"] - sv["start_s"]
+            recovered.append({**sv, "scene": "chute_libre"})
+            accumulated += sv_dur
+        # Mettre a jour les listes
+        by_scene["chute_libre"] = chute_segs + recovered
+        by_scene["sous_voile"] = [s for s in sv_sorted
+                                    if s not in [r for r in recovered]]
+        log.info("Fallback sous_voile->chute_libre : %d segs, %.1fs recuperes",
+                  len(recovered), accumulated)
 
     out = []
     for scene in order:
@@ -528,10 +593,10 @@ def select_best_clips(segments: list[dict],
             "scene": scene,
         })
 
-    # Resoudre les chevauchements temporels (evite "2 fois la meme image")
-    # On tri d'abord par start_s, puis on coupe les chevauchements en
-    # gardant l'ordre narratif (la scene la plus tard "gagne").
-    out = _resolve_overlaps(out)
+    # Resoudre les chevauchements MAJEURS uniquement (>= 15s)
+    # Les petits chevauchements sont en fait des transitions fluides
+    # entre scenes adjacentes (ex: fin de sortie -> debut chute_libre).
+    out = _resolve_overlaps(out, overlap_threshold=15.0)
     return out
 
 
