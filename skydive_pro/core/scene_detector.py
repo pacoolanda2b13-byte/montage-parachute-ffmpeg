@@ -298,16 +298,22 @@ def extract_keyframes(video_path: str | Path,
 
 _GEMINI_PROMPT = """Tu analyses une photo extraite d'une vidéo de saut en parachute tandem.
 Classifie UNE seule scène parmi cette liste exacte :
-- briefing (passager et moniteur au sol, équipement, gestes d'explication)
-- vehicule_embarquement (voiture/minibus, personne qui monte ou descend)
-- montee_avion (intérieur avion, passagers assis, hublot, moteur)
-- sortie_avion (porte ouverte, sortie, parachute attaché)
-- chute_libre (ciel, visage du passager visible en vol, vent)
-- sous_voile (voile ouverte visible, ciel dégagé, descente calme)
-- atterrissage (sol proche, pieds touchant le sol, voile derrière)
-- reaction_emotion (passager au sol après saut, visage plein cadre, émotion forte)
-- interaction_moniteur (moniteur et passager ensemble, geste : check, high-five, câlin)
-- autre (si aucune ne correspond)
+- briefing (passager et moniteur AU SOL devant un hangar/zone d'embarquement, équipement visible, gestes d'explication)
+- vehicule_embarquement (voiture/minibus à l'arrêt, personne qui monte ou descend du véhicule)
+- dans_avion (INTÉRIEUR de la cabine d'avion, passagers ASSIS sur leurs sièges, harnais, casques, ambiance avion vue de l'intérieur)
+- paysage_avion (vue par le HUBLOT ou vue extérieure depuis l'avion, paysage visible : MER, MONTAGNE, côte, nuages, sol vu d'en haut. Pas de personnes au premier plan)
+- sortie_avion (porte de l'avion OUVERTE, moment du SAUT lui-même, parachute attaché, transition cabine vers vide)
+- chute_libre (vol libre dans le ciel, ciel autour, vent visible, visage du passager qui hurle ou rigole, pas de voile visible)
+- sous_voile (voile ouverte VISIBLE au-dessus, descente calme, paysage défilant doucement)
+- atterrissage (sol PROCHE, pieds qui touchent le sol, voile en arrière-plan posée)
+- reaction_emotion (passager AU SOL après le saut, visage plein cadre, sourire, émotion forte, après que la voile est posée)
+- interaction_moniteur (moniteur et passager ensemble au sol APRÈS atterrissage, geste : check, high-five, câlin, poignée de main)
+- autre (si aucune ne correspond clairement)
+
+IMPORTANT :
+- Si tu vois des passagers ASSIS dans une cabine = dans_avion (PAS montée_avion)
+- Si tu vois la mer, la montagne, ou un paysage par le hublot = paysage_avion (PAS dans_avion)
+- "montée_avion" n'existe plus, utilise dans_avion ou paysage_avion selon le cadrage
 
 Réponds UNIQUEMENT avec un JSON compact :
 {"scene": "nom_scene", "confiance": 0.0-1.0}"""

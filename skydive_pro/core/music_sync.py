@@ -139,6 +139,8 @@ SCENE_TRANSITION_STYLE = {
     "intro":               "fade",
     "briefing":            "fade",
     "vehicule_embarquement": "fade",
+    "dans_avion":          "fade",  # ambiance calme
+    "paysage_avion":       "fade",  # contemplation paysage
     "montee_avion":        "fade",
     "sortie_avion":        "cut",   # ⚡ climax 1 — cut net sur le beat
     "chute_libre":         "cut",   # ⚡ climax central

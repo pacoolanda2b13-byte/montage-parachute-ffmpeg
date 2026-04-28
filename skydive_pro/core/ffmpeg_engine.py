@@ -232,17 +232,20 @@ def _mix_music(video_path: Path, music_path: Path, out_path: Path,
 # Priorité client : plus de chute libre, ouverture du parachute visible,
 # vraie sortie d'avion et vrai atterrissage.
 SCENE_DURATIONS_CIBLE = {
-    "briefing": 8,            # +2s
-    "vehicule_embarquement": 5,  # +2s
-    "montee_avion": 10,       # +2s
-    "sortie_avion": 30,       # +18s : sequence COMPLETE de la sortie
-    "chute_libre": 90,        # +15s : le moment phare, bien etale
-    "sous_voile": 30,         # +18s : ouverture parachute + plane (validee user)
-    "atterrissage": 35,       # +17s : approche + flare + arret au sol
-    "reaction_emotion": 20,   # +5s
-    "interaction_moniteur": 15,  # +3s
+    "briefing": 10,
+    "vehicule_embarquement": 5,
+    "dans_avion": 10,         # NEW : interieur cabine
+    "paysage_avion": 30,      # NEW : vues mer/montagne par hublot
+    "montee_avion": 5,        # legacy, on garde minimal au cas ou Gemini renvoie ca
+    "sortie_avion": 30,
+    "chute_libre": 90,
+    "sous_voile": 30,
+    "atterrissage": 35,
+    "reaction_emotion": 30,
+    "interaction_moniteur": 15,
 }
-# Total cible : 243s = 4 min 03
+# Total cible avec toutes les scenes : ~290s = 4 min 50
+# Sans interaction (videos courtes) : ~275s = 4 min 35
 
 # Ou extraire le clip dans le segment source :
 #   "start"  -> prendre les premieres secondes (capture le debut du moment)
@@ -255,6 +258,8 @@ SCENE_CLIP_POSITION = {
     "chute_libre":    "middle",
     "briefing":       "middle",
     "vehicule_embarquement": "middle",
+    "dans_avion":     "middle",
+    "paysage_avion":  "middle",
     "montee_avion":   "middle",
     "reaction_emotion": "middle",
     "interaction_moniteur": "middle",
@@ -270,6 +275,36 @@ SCENE_SUBDIVIDE = {
     "chute_libre": 1,      # garde un plan continu pour le climax central
     "atterrissage": 1,
 }
+
+
+def _resolve_overlaps(clips: list[dict], min_gap_s: float = 0.0) -> list[dict]:
+    """Resout les chevauchements temporels entre clips selectionnes.
+
+    Strategie : pour chaque paire adjacente (apres tri par start_s), si
+    le clip A se termine apres le debut du clip B, on tronque A. La
+    scene avec la plus haute priorite (climax) garde priorite, mais
+    par defaut on coupe le clip precedent (chronologique).
+
+    Garantit qu'aucune image source n'apparait 2 fois dans le montage.
+    """
+    if len(clips) < 2:
+        return clips
+    sorted_clips = sorted(clips, key=lambda c: c["start_s"])
+    resolved = [dict(sorted_clips[0])]
+    for c in sorted_clips[1:]:
+        prev = resolved[-1]
+        # Chevauchement detecte
+        if c["start_s"] < prev["end_s"]:
+            # Tronquer le precedent pour qu'il s'arrete au start du suivant
+            new_prev_end = c["start_s"] - min_gap_s
+            if new_prev_end > prev["start_s"] + 0.5:  # garde au moins 0.5s
+                prev["end_s"] = new_prev_end
+            else:
+                # Le precedent est trop court -> on le supprime
+                resolved.pop()
+        resolved.append(dict(c))
+    # Filter out clips ridiculement courts
+    return [c for c in resolved if (c["end_s"] - c["start_s"]) >= 0.5]
 
 
 def _merge_adjacent(segments: list[dict], gap_s: float = 5.0) -> list[dict]:
@@ -358,8 +393,12 @@ def select_best_clips(segments: list[dict],
     """
     durations = scene_durations or SCENE_DURATIONS_CIBLE
     segments = _merge_adjacent(segments)
-    # Order narratif
-    order = ["briefing", "vehicule_embarquement", "montee_avion",
+    # Order narratif (briefing -> embarquement -> dans_avion ->
+    # paysage_avion -> sortie -> chute -> sous_voile -> atterrissage ->
+    # reaction -> interaction). "montee_avion" garde sa place legacy
+    # mais la valeur de duree sert de fallback uniquement.
+    order = ["briefing", "vehicule_embarquement",
+             "dans_avion", "paysage_avion", "montee_avion",
              "sortie_avion", "chute_libre", "sous_voile",
              "atterrissage", "reaction_emotion", "interaction_moniteur"]
 
@@ -488,6 +527,11 @@ def select_best_clips(segments: list[dict],
             "end_s": seg_end,
             "scene": scene,
         })
+
+    # Resoudre les chevauchements temporels (evite "2 fois la meme image")
+    # On tri d'abord par start_s, puis on coupe les chevauchements en
+    # gardant l'ordre narratif (la scene la plus tard "gagne").
+    out = _resolve_overlaps(out)
     return out
 
 
