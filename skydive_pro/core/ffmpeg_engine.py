@@ -578,8 +578,14 @@ def select_best_clips(segments: list[dict],
                     "end_s": min(sv_zone_end, sv_zone_start + sous_voile_d),
                     "scene": "sous_voile"})
 
-    # Atterrissage
+    # Atterrissage : si la video ne va pas assez loin pour avoir
+    # atter_d secondes apres atter_start, on etend en ARRIERE
+    # (l'approche d'atterrissage est aussi importante que le touchdown).
     atter_end = min(atter_start + atter_d, video_duration_s - 0.5)
+    actual_dur = atter_end - atter_start
+    if actual_dur < atter_d:
+        # Pas assez de matiere apres : decale atter_start en arriere
+        atter_start = max(chute_end, atter_end - atter_d)
     out.append({"start_s": atter_start, "end_s": atter_end,
                 "scene": "atterrissage"})
 
@@ -916,17 +922,33 @@ def build_montage(video_source: str | Path,
             _still_to_clip(intro_overlay, 2.5, intro_clip, width, height, fps)
             clips_files.append(intro_clip)
 
-        # Clips — fade par scène selon SCENE_TRANSITION_STYLE
+        # Clips — fade UNIQUEMENT aux FRONTIERES de scenes :
+        # - fade_in si scene differente de la precedente (ou 1er clip)
+        # - fade_out si scene differente de la suivante (ou dernier clip)
+        # → Entre 2 sous-clips de la MEME scene (ex: 3 cuts sous_voile),
+        #   pas de mini-fondu parasite.
         clips_perdus = []
         for i, seg in enumerate(best):
             out = tmpdir / f"clip_{i:02d}_{seg['scene']}.mp4"
             style = transition_style_for(seg["scene"])
-            # Cut sec (climax) = 0, fade = fade_duration_s
-            fd = 0.0 if style == "cut" else fade_duration_s
+            scene = seg["scene"]
+            prev_scene = best[i - 1]["scene"] if i > 0 else None
+            next_scene = best[i + 1]["scene"] if i < len(best) - 1 else None
+            is_first_of_scene = (scene != prev_scene)
+            is_last_of_scene = (scene != next_scene)
+
+            if style == "cut":
+                # Climax : aucun fade nulle part (cut sec)
+                fade_in = 0.0
+                fade_out = 0.0
+            else:
+                # Scenes calmes : fade SEULEMENT aux frontieres de scene
+                fade_in = fade_duration_s if is_first_of_scene else 0.0
+                fade_out = fade_duration_s if is_last_of_scene else 0.0
             try:
                 _cut_clip(video_source, seg["start_s"], seg["end_s"], out,
                            width, height, fps,
-                           fade_in=fd, fade_out=fd)
+                           fade_in=fade_in, fade_out=fade_out)
                 clips_files.append(out)
             except subprocess.CalledProcessError as e:
                 err = (e.stderr or b"").decode("utf-8", errors="replace")[:300]
