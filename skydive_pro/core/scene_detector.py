@@ -327,18 +327,32 @@ def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
     if not frames:
         return []
 
-    try:
-        import google.generativeai as genai
-    except ImportError:
-        log.warning("google-generativeai non installé — vision désactivée")
-        return []
+    # Préfère le nouveau SDK google-genai (Tier 1 propre, billing à jour).
+    # Fallback transparent vers l'ancien google-generativeai si pas installé.
+    use_new_sdk = False
+    new_client = None
+    old_model = None
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 
     try:
-        genai.configure(api_key=api_key)
-        model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-flash")
-        model = genai.GenerativeModel(model_name)
+        from google import genai as genai_new
+        new_client = genai_new.Client(api_key=api_key)
+        use_new_sdk = True
+        log.info("Gemini: utilisation SDK google-genai (Tier 1 OK)")
+    except ImportError:
+        try:
+            import google.generativeai as genai_old
+            genai_old.configure(api_key=api_key)
+            old_model = genai_old.GenerativeModel(model_name)
+            log.warning("Gemini: fallback ancien SDK google-generativeai (deprecated)")
+        except ImportError:
+            log.warning("Aucun SDK Gemini installé — vision désactivée")
+            return []
+        except Exception as e:
+            log.error("Configuration Gemini (ancien SDK) échouée: %s", e)
+            return []
     except Exception as e:
-        log.error("Configuration Gemini échouée: %s", e)
+        log.error("Configuration Gemini (nouveau SDK) échouée: %s", e)
         return []
 
     results = []
@@ -351,16 +365,27 @@ def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
                             "confiance": 0.0, "erreur": "quota_exhausted"})
             continue
         try:
-            # Le SDK Python accepte bytes OU base64 string dans le dict.
-            # On passe en base64 pour être safe sur toutes les versions SDK.
             with open(fpath, "rb") as f:
                 img_bytes = f.read()
-            img_b64 = base64.b64encode(img_bytes).decode("ascii")
 
-            response = model.generate_content([
-                {"mime_type": "image/jpeg", "data": img_b64},
-                _GEMINI_PROMPT,
-            ])
+            if use_new_sdk:
+                # Nouveau SDK : Part.from_bytes accepte directement les bytes
+                from google.genai import types as genai_types
+                response = new_client.models.generate_content(
+                    model=model_name,
+                    contents=[
+                        genai_types.Part.from_bytes(
+                            data=img_bytes, mime_type="image/jpeg"
+                        ),
+                        _GEMINI_PROMPT,
+                    ],
+                )
+            else:
+                img_b64 = base64.b64encode(img_bytes).decode("ascii")
+                response = old_model.generate_content([
+                    {"mime_type": "image/jpeg", "data": img_b64},
+                    _GEMINI_PROMPT,
+                ])
             text = (response.text or "").strip()
             # Nettoyer markdown si présent
             if text.startswith("```"):

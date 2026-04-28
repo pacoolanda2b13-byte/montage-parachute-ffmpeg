@@ -142,7 +142,7 @@ SCENE_TRANSITION_STYLE = {
     "montee_avion":        "fade",
     "sortie_avion":        "cut",   # ⚡ climax 1 — cut net sur le beat
     "chute_libre":         "cut",   # ⚡ climax central
-    "sous_voile":          "fade",
+    "sous_voile":          "cut",   # ⚡ user feedback : plus de dynamisme
     "atterrissage":        "cut",   # ⚡ climax final
     "reaction_emotion":    "cut",   # ⚡ punch émotionnel
     "interaction_moniteur": "fade",

@@ -260,6 +260,17 @@ SCENE_CLIP_POSITION = {
     "interaction_moniteur": "middle",
 }
 
+# Subdivision : pour rendre les scenes longues plus dynamiques, on les
+# decoupe en N sous-clips repartis sur la duree du segment source.
+# Chaque sous-clip est ~ duree_cible/N et place dans le segment a
+# intervalles reguliers (debut, milieu, fin).
+# 1 = pas de subdivision (clip unique)
+SCENE_SUBDIVIDE = {
+    "sous_voile": 3,       # 3 sous-clips de ~10s = ouverture / plane / approche
+    "chute_libre": 1,      # garde un plan continu pour le climax central
+    "atterrissage": 1,
+}
+
 
 def select_best_clips(segments: list[dict],
                        max_total_duration_s: int = 210,
@@ -295,6 +306,26 @@ def select_best_clips(segments: list[dict],
         seg_start = max(0.0, best["start_s"])
         seg_end = max(seg_start, best["end_s"])
         seg_dur = seg_end - seg_start
+
+        # Subdivision : decouper en N sous-clips pour plus de dynamisme
+        n_sub = SCENE_SUBDIVIDE.get(scene, 1)
+        if n_sub > 1 and seg_dur >= n_sub * 2:  # au moins 2s par sous-clip
+            sub_target = target / n_sub
+            # Repartir N points equi-distribues sur le segment source
+            # (debut + (N-1) * pas)
+            usable_dur = max(0.0, seg_dur - sub_target)
+            for k in range(n_sub):
+                if n_sub == 1:
+                    sub_offset = 0.0
+                else:
+                    sub_offset = (usable_dur * k) / (n_sub - 1)
+                sub_start = seg_start + sub_offset
+                sub_end = min(seg_end, sub_start + sub_target)
+                out.append({"start_s": sub_start, "end_s": sub_end,
+                            "scene": scene})
+            continue  # passe a la scene suivante
+
+        # Pas de subdivision : 1 seul clip
         if seg_dur <= target:
             out.append({"start_s": seg_start,
                         "end_s": seg_end, "scene": scene})
