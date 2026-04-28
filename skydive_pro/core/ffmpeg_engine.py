@@ -72,16 +72,43 @@ def _pick_encoder(preferred: Optional[str] = None) -> str:
 
 def _cut_clip(video: str | Path, start: float, end: float,
                out_path: Path, width: int = 1920, height: int = 1080,
-               fps: int = 30) -> Path:
-    """Coupe un sous-clip normalisé (résolution/fps unifiés)."""
+               fps: int = 30,
+               fade_in: float = 0.0, fade_out: float = 0.0) -> Path:
+    """Coupe un sous-clip normalisé (résolution/fps unifiés).
+
+    Args:
+        fade_in/fade_out : durée du fondu (s). 0 = cut sec (transition net sur beat).
+                           > 0 = fondu vidéo+audio progressif (style smooth).
+    """
     ffmpeg, _ = _find_ffmpeg()
     duration = max(0.1, end - start)
+
+    # Filtres vidéo : scale + pad + fps + (fades optionnels)
+    vf = (f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+          f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}")
+    if fade_in > 0:
+        vf += f",fade=t=in:st=0:d={fade_in:.2f}"
+    if fade_out > 0:
+        fo_start = max(0.0, duration - fade_out)
+        vf += f",fade=t=out:st={fo_start:.2f}:d={fade_out:.2f}"
+
+    # Filtres audio : fades optionnels (sinon copie directe)
+    af_parts = []
+    if fade_in > 0:
+        af_parts.append(f"afade=t=in:st=0:d={fade_in:.2f}")
+    if fade_out > 0:
+        fo_start = max(0.0, duration - fade_out)
+        af_parts.append(f"afade=t=out:st={fo_start:.2f}:d={fade_out:.2f}")
+
     cmd = [
         ffmpeg, "-y", "-v", "error",
         "-ss", str(start), "-i", str(video),
         "-t", str(duration),
-        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-               f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,fps={fps}",
+        "-vf", vf,
+    ]
+    if af_parts:
+        cmd += ["-af", ",".join(af_parts)]
+    cmd += [
         "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
         "-c:a", "aac", "-ar", "44100", "-ac", "2",
         str(out_path),
@@ -205,16 +232,17 @@ def _mix_music(video_path: Path, music_path: Path, out_path: Path,
 # Priorité client : plus de chute libre, ouverture du parachute visible,
 # vraie sortie d'avion et vrai atterrissage.
 SCENE_DURATIONS_CIBLE = {
-    "briefing": 6,
-    "vehicule_embarquement": 3,
-    "montee_avion": 8,
-    "sortie_avion": 12,       # +7s : bien voir le saut hors avion
-    "chute_libre": 75,        # +25s : le moment phare
-    "sous_voile": 12,         # -8s : moins de plané, on prend le DEBUT
-    "atterrissage": 18,       # +8s : voir l'arrive au sol
-    "reaction_emotion": 15,
-    "interaction_moniteur": 12,
+    "briefing": 8,            # +2s
+    "vehicule_embarquement": 5,  # +2s
+    "montee_avion": 10,       # +2s
+    "sortie_avion": 30,       # +18s : sequence COMPLETE de la sortie
+    "chute_libre": 90,        # +15s : le moment phare, bien etale
+    "sous_voile": 30,         # +18s : ouverture parachute + plane (validee user)
+    "atterrissage": 35,       # +17s : approche + flare + arret au sol
+    "reaction_emotion": 20,   # +5s
+    "interaction_moniteur": 15,  # +3s
 }
+# Total cible : 243s = 4 min 03
 
 # Ou extraire le clip dans le segment source :
 #   "start"  -> prendre les premieres secondes (capture le debut du moment)
@@ -234,14 +262,17 @@ SCENE_CLIP_POSITION = {
 
 
 def select_best_clips(segments: list[dict],
-                       max_total_duration_s: int = 210) -> list[dict]:
+                       max_total_duration_s: int = 210,
+                       scene_durations: Optional[dict] = None) -> list[dict]:
     """Sélectionne et trim les clips pour respecter la durée cible.
 
     Stratégie simple :
-        - Pour chaque scène, on prend au plus SCENE_DURATIONS_CIBLE[scene]
+        - Pour chaque scène, on prend au plus scene_durations[scene]
+          (ou SCENE_DURATIONS_CIBLE par défaut, possiblement snappé sur beats)
         - On prend le milieu du segment (meilleur moment en général)
         - On garde l'ordre narratif (briefing → ... → interaction_moniteur)
     """
+    durations = scene_durations or SCENE_DURATIONS_CIBLE
     # Order narratif
     order = ["briefing", "vehicule_embarquement", "montee_avion",
              "sortie_avion", "chute_libre", "sous_voile",
@@ -260,7 +291,7 @@ def select_best_clips(segments: list[dict],
             continue
         # Garder le plus long segment de la scène
         best = max(segs, key=lambda s: s["end_s"] - s["start_s"])
-        target = SCENE_DURATIONS_CIBLE.get(scene, 8)
+        target = durations.get(scene, 8)
         seg_start = max(0.0, best["start_s"])
         seg_end = max(seg_start, best["end_s"])
         seg_dur = seg_end - seg_start
@@ -301,8 +332,15 @@ def build_montage(video_source: str | Path,
                    max_duration_s: int = 210,
                    encoder: Optional[str] = None,
                    width: int = 1920, height: int = 1080, fps: int = 30,
+                   beat_sync: bool = True,
+                   fade_duration_s: float = 0.4,
                    ) -> Path:
     """Construit le montage final à partir des segments sélectionnés.
+
+    Args:
+        beat_sync       : si True et music_path fournie, snap les durées scènes
+                          sur les beats de la musique (cuts en rythme).
+        fade_duration_s : durée du fondu pour les scènes "calm" (style C).
 
     Returns: chemin du MP4 final.
     """
@@ -311,27 +349,57 @@ def build_montage(video_source: str | Path,
     output_path.parent.mkdir(parents=True, exist_ok=True)
     encoder = encoder or _pick_encoder()
 
-    # 1. Sélectionner les meilleurs clips
-    best = select_best_clips(segments, max_total_duration_s=max_duration_s)
+    # 0. Beat-sync : si musique fournie, on ajuste les durées cibles sur le tempo
+    durations = dict(SCENE_DURATIONS_CIBLE)
+    beat_period = None
+    if beat_sync and music_path and Path(music_path).exists():
+        try:
+            from core.music_sync import analyze_beats, quantize_durations
+            info = analyze_beats(music_path)
+            if info.get("available"):
+                beat_period = info["beat_period"]
+                durations = quantize_durations(durations, beat_period)
+                log.info(
+                    "Beat-sync ON : %.1f BPM, durées snappées au beat (%.2fs)",
+                    info["tempo"], beat_period,
+                )
+        except Exception as e:
+            log.warning("Beat-sync indisponible (%s) — durées brutes", e)
+
+    # 1. Sélectionner les meilleurs clips (avec durées éventuellement snappées)
+    best = select_best_clips(segments, max_total_duration_s=max_duration_s,
+                              scene_durations=durations)
 
     # 2. Couper chaque clip + intro/stats/outro
     tmpdir = Path(tempfile.mkdtemp(prefix="montage_"))
     clips_files: list[Path] = []
 
+    # Style C de transitions : 'cut' = pas de fondu (transition nette sur beat),
+    # 'fade' = fondu in/out de fade_duration_s (transition smooth).
     try:
-        # Intro (2.5s)
+        from core.music_sync import transition_style_for
+    except ImportError:
+        def transition_style_for(_):  # fallback minimal
+            return "fade"
+
+    try:
+        # Intro (2.5s) — toujours en fondu
         if intro_overlay:
             intro_clip = tmpdir / "00_intro.mp4"
             _still_to_clip(intro_overlay, 2.5, intro_clip, width, height, fps)
             clips_files.append(intro_clip)
 
-        # Clips
+        # Clips — fade par scène selon SCENE_TRANSITION_STYLE
         clips_perdus = []
         for i, seg in enumerate(best):
             out = tmpdir / f"clip_{i:02d}_{seg['scene']}.mp4"
+            style = transition_style_for(seg["scene"])
+            # Cut sec (climax) = 0, fade = fade_duration_s
+            fd = 0.0 if style == "cut" else fade_duration_s
             try:
                 _cut_clip(video_source, seg["start_s"], seg["end_s"], out,
-                           width, height, fps)
+                           width, height, fps,
+                           fade_in=fd, fade_out=fd)
                 clips_files.append(out)
             except subprocess.CalledProcessError as e:
                 err = (e.stderr or b"").decode("utf-8", errors="replace")[:300]
