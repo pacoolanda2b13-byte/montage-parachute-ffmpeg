@@ -185,7 +185,11 @@ function Invoke-Concat {
         $abs = $c.FullName.Replace("'", "'\''").Replace("\", "/")
         $lines += "file '$abs'"
     }
-    Set-Content -Path $listFile -Value $lines -Encoding UTF8
+    # IMPORTANT : ecrire en UTF-8 SANS BOM (ffmpeg ne sait pas lire le BOM
+    # et plante avec "unknown keyword '﻿ile'"). PS 5.1 Set-Content
+    # -Encoding UTF8 ajoute un BOM, donc on passe par .NET directement.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllLines($listFile, $lines, $utf8NoBom)
     try {
         # Tentative 1 : avec mapping GPMF (stream 3 chez GoPro)
         & ffmpeg -y -v error -f concat -safe 0 -i $listFile `
