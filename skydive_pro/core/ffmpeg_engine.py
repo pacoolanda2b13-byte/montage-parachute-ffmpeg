@@ -379,18 +379,189 @@ def _take_target_from_scene(segs_for_scene: list[dict], target: float,
 
 
 def select_best_clips(segments: list[dict],
+                       max_total_duration_s: int = 320,
+                       scene_durations: Optional[dict] = None,
+                       video_duration_s: Optional[float] = None
+                       ) -> list[dict]:
+    """Selection POSITIONNELLE garantissant l'ordre temporel narratif.
+
+    Strategie :
+        - Identifier 2 marqueurs cles via Gemini : 1ere chute_libre +
+          1ere atterrissage
+        - Decouper la video sequentiellement en respectant l'ordre
+          temporel (briefing -> ... -> atterrissage)
+        - Plus de melange entre fallback positionnel et segments Gemini
+          qui creait des sauts narratifs (l'utilisateur voyait la video
+          sauter entre des moments differents).
+
+    Args:
+        segments        : segments classifies par Gemini (juste utilises
+                          pour reperer les positions de chute/atterrissage)
+        scene_durations : durees cibles par scene
+        video_duration_s: duree totale de la video source (None -> deduit
+                          du max end_s des segments)
+    """
+    durations = scene_durations or SCENE_DURATIONS_CIBLE
+
+    # ─── 1. Detecter la duree totale de la video ───
+    if video_duration_s is None:
+        video_duration_s = max((s.get("end_s", 0) for s in segments),
+                                default=0.0)
+    if video_duration_s <= 0:
+        log.warning("select_best_clips: video_duration_s inconnue")
+        return []
+
+    # ─── 2. Identifier les marqueurs cles via Gemini ───
+    chute_segs = [s for s in segments if s.get("scene") == "chute_libre"]
+    atter_segs = [s for s in segments if s.get("scene") == "atterrissage"]
+
+    if chute_segs:
+        chute_start = min(s["start_s"] for s in chute_segs)
+    else:
+        # Pas de chute detectee : on suppose qu'elle commence a 30% video
+        chute_start = video_duration_s * 0.30
+        log.warning("Pas de chute_libre detectee — fallback chute_start=%.1fs",
+                     chute_start)
+
+    if atter_segs:
+        atter_start = min(s["start_s"] for s in atter_segs)
+    else:
+        # Pas d'atterrissage : 35s avant la fin
+        atter_start = max(chute_start + 90, video_duration_s - 35)
+        log.warning("Pas d'atterrissage detecte — fallback atter_start=%.1fs",
+                     atter_start)
+
+    # Securites : chute_start >= 60s (pour avoir du pre-saut),
+    # atter_start >= chute_start + 90s
+    chute_start = max(60.0, chute_start)
+    atter_start = max(chute_start + 60.0, atter_start)
+    atter_start = min(atter_start, video_duration_s - 5.0)
+
+    log.info("Marqueurs : chute=%.1fs, atter=%.1fs, video=%.1fs",
+              chute_start, atter_start, video_duration_s)
+
+    # ─── 3. Decoupage sequentiel garanti dans l'ordre temporel ───
+    out = []
+    briefing_d = durations.get("briefing", 10)
+    embarq_d = durations.get("vehicule_embarquement", 5)
+    dans_avion_d = durations.get("dans_avion", 10)
+    paysage_d = durations.get("paysage_avion", 30)
+    montee_d = durations.get("montee_avion", 5)
+    sortie_d = durations.get("sortie_avion", 30)
+    chute_d = durations.get("chute_libre", 90)
+    sous_voile_d = durations.get("sous_voile", 30)
+    atter_d = durations.get("atterrissage", 35)
+    reaction_d = durations.get("reaction_emotion", 30)
+    interaction_d = durations.get("interaction_moniteur", 15)
+
+    # Pre-saut : [0, chute_start - sortie_d]
+    pre_saut_end = chute_start - sortie_d
+    pre_saut_duration = pre_saut_end
+    cible_pre_saut = briefing_d + embarq_d + dans_avion_d + paysage_d + montee_d
+
+    if pre_saut_duration < cible_pre_saut:
+        # Compresser paysage_avion en priorite (le moins critique)
+        deficit = cible_pre_saut - pre_saut_duration
+        paysage_d = max(8.0, paysage_d - deficit)
+        cible_pre_saut = briefing_d + embarq_d + dans_avion_d + paysage_d + montee_d
+        if pre_saut_duration < cible_pre_saut:
+            # Encore trop court : reduire dans_avion + briefing proportionnellement
+            scale = pre_saut_duration / cible_pre_saut
+            briefing_d *= scale
+            embarq_d *= scale
+            dans_avion_d *= scale
+            paysage_d *= scale
+            montee_d *= scale
+
+    # Cursor temporel dans la video source
+    cursor = 0.0
+    out.append({"start_s": cursor, "end_s": cursor + briefing_d,
+                "scene": "briefing"})
+    cursor += briefing_d
+    out.append({"start_s": cursor, "end_s": cursor + embarq_d,
+                "scene": "vehicule_embarquement"})
+    cursor += embarq_d
+    out.append({"start_s": cursor, "end_s": cursor + dans_avion_d,
+                "scene": "dans_avion"})
+    cursor += dans_avion_d
+    out.append({"start_s": cursor, "end_s": cursor + paysage_d,
+                "scene": "paysage_avion"})
+    # Montee : les derniers montee_d secondes avant la sortie
+    sortie_start = chute_start - sortie_d
+    out.append({"start_s": sortie_start - montee_d, "end_s": sortie_start,
+                "scene": "montee_avion"})
+
+    # Sortie d'avion
+    out.append({"start_s": sortie_start, "end_s": chute_start,
+                "scene": "sortie_avion"})
+
+    # Chute libre : [chute_start, chute_end]
+    # Garder au moins sous_voile_d secondes avant l'atterrissage
+    max_chute_end = atter_start - sous_voile_d
+    chute_end = min(chute_start + chute_d, max_chute_end)
+    if chute_end - chute_start < 30:  # securite : pas de chute < 30s
+        chute_end = chute_start + 30
+    out.append({"start_s": chute_start, "end_s": chute_end,
+                "scene": "chute_libre"})
+
+    # Sous voile : zone [chute_end, atter_start]
+    sv_zone_start = chute_end
+    sv_zone_end = atter_start
+    sv_zone_dur = sv_zone_end - sv_zone_start
+    n_sub = SCENE_SUBDIVIDE.get("sous_voile", 3)
+    if sv_zone_dur >= 30 and n_sub > 1:
+        # 3 sous-clips espaces dans la zone sous-voile
+        sub_target = sous_voile_d / n_sub
+        usable = max(0.0, sv_zone_dur - sub_target)
+        for k in range(n_sub):
+            if n_sub == 1:
+                off = 0.0
+            else:
+                off = (usable * k) / (n_sub - 1)
+            ss = sv_zone_start + off
+            out.append({"start_s": ss, "end_s": ss + sub_target,
+                        "scene": "sous_voile"})
+    else:
+        # Petit zone : un seul clip
+        out.append({"start_s": sv_zone_start,
+                    "end_s": min(sv_zone_end, sv_zone_start + sous_voile_d),
+                    "scene": "sous_voile"})
+
+    # Atterrissage
+    atter_end = min(atter_start + atter_d, video_duration_s - 0.5)
+    out.append({"start_s": atter_start, "end_s": atter_end,
+                "scene": "atterrissage"})
+
+    # Reaction emotion + interaction moniteur (si video continue apres)
+    remaining = video_duration_s - atter_end
+    if remaining > 5:
+        r_dur = min(reaction_d, remaining - 1)
+        out.append({"start_s": atter_end, "end_s": atter_end + r_dur,
+                    "scene": "reaction_emotion"})
+        rest = remaining - r_dur
+        if rest > 5:
+            i_dur = min(interaction_d, rest - 1)
+            out.append({
+                "start_s": atter_end + r_dur,
+                "end_s": atter_end + r_dur + i_dur,
+                "scene": "interaction_moniteur",
+            })
+
+    log.info("select_best_clips POSITIONAL : %d clips, %.1fs total",
+              len(out),
+              sum(c["end_s"] - c["start_s"] for c in out))
+    return out
+
+
+# ─── ANCIENNE STRATEGIE (gardee pour reference, plus utilisee) ───
+def select_best_clips_legacy(segments: list[dict],
                        max_total_duration_s: int = 210,
                        scene_durations: Optional[dict] = None) -> list[dict]:
-    """Sélectionne et trim les clips pour respecter la durée cible.
+    """[DEPRECATED] Strategie multi-segment basee sur classification Gemini.
 
-    Stratégie multi-segment :
-        - Fusionne les segments adjacents de même scène
-        - Pour chaque scène, cumule plusieurs segments si nécessaire pour
-          atteindre la durée cible (au lieu d'un seul "best")
-        - Fallback positionnel : si "briefing"/"vehicule_embarquement"
-          manquent mais qu'un segment "montee_avion" couvre tout le début
-          de la vidéo, on subdivise ce gros segment en briefing/embarquement
-          /montée pour une vraie structure narrative.
+    Probleme observe : melange entre fallback positionnel et segments
+    Gemini cree des sauts narratifs dans la video finale. Remplacee
+    par select_best_clips() qui garantit l'ordre temporel.
     """
     durations = scene_durations or SCENE_DURATIONS_CIBLE
     segments = _merge_adjacent(segments)
@@ -648,9 +819,24 @@ def build_montage(video_source: str | Path,
         except Exception as e:
             log.warning("Beat-sync indisponible (%s) — durées brutes", e)
 
-    # 1. Sélectionner les meilleurs clips (avec durées éventuellement snappées)
+    # 1. Detecter la duree de la video source (necessaire pour la
+    # strategie positionnelle de select_best_clips)
+    _, ffprobe = _find_ffmpeg()
+    try:
+        r = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(video_source)],
+            capture_output=True, text=True, check=True,
+        )
+        video_duration_s = float(r.stdout.strip())
+    except Exception:
+        video_duration_s = None
+
+    # 2. Selection POSITIONNELLE : decoupage sequentiel garanti dans
+    #    l'ordre temporel de la video source
     best = select_best_clips(segments, max_total_duration_s=max_duration_s,
-                              scene_durations=durations)
+                              scene_durations=durations,
+                              video_duration_s=video_duration_s)
 
     # 2. Couper chaque clip + intro/stats/outro
     tmpdir = Path(tempfile.mkdtemp(prefix="montage_"))
