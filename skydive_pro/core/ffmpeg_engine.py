@@ -272,18 +272,92 @@ SCENE_SUBDIVIDE = {
 }
 
 
+def _merge_adjacent(segments: list[dict], gap_s: float = 5.0) -> list[dict]:
+    """Fusionne les segments adjacents portant le même label scene.
+
+    Deux segments sont considérés adjacents si l'écart entre la fin du
+    premier et le début du second est <= gap_s.
+    """
+    if not segments:
+        return []
+    sorted_segs = sorted(segments, key=lambda s: s.get("start_s", 0))
+    merged = [dict(sorted_segs[0])]
+    for seg in sorted_segs[1:]:
+        last = merged[-1]
+        same_scene = seg.get("scene") == last.get("scene")
+        gap = seg.get("start_s", 0) - last.get("end_s", 0)
+        if same_scene and gap <= gap_s:
+            last["end_s"] = max(last["end_s"], seg.get("end_s", 0))
+        else:
+            merged.append(dict(seg))
+    return merged
+
+
+def _take_target_from_scene(segs_for_scene: list[dict], target: float,
+                             pos: str = "middle") -> list[dict]:
+    """Prend autant de segments que nécessaire pour cumuler `target` secondes.
+
+    Stratégie :
+        - Trier les segments par durée décroissante
+        - En prendre un par un jusqu'à atteindre target
+        - Si le dernier segment dépasse, le tronquer (selon `pos`)
+        - Retourner les clips dans l'ordre temporel d'origine
+    """
+    if not segs_for_scene:
+        return []
+    by_dur = sorted(segs_for_scene,
+                     key=lambda s: s["end_s"] - s["start_s"], reverse=True)
+    picked = []
+    cumul = 0.0
+    for seg in by_dur:
+        if cumul >= target:
+            break
+        seg_dur = seg["end_s"] - seg["start_s"]
+        remaining = target - cumul
+        if seg_dur <= remaining:
+            picked.append({"start_s": seg["start_s"],
+                            "end_s": seg["end_s"],
+                            "scene": seg["scene"]})
+            cumul += seg_dur
+        else:
+            # Tronquer ce segment selon la position
+            seg_start = seg["start_s"]
+            seg_end = seg["end_s"]
+            if pos == "start":
+                new_start = seg_start
+                new_end = seg_start + remaining
+            elif pos == "end":
+                new_end = seg_end
+                new_start = seg_end - remaining
+            else:  # middle
+                mid = (seg_start + seg_end) / 2
+                half = remaining / 2
+                new_start = max(seg_start, mid - half)
+                new_end = new_start + remaining
+            picked.append({"start_s": new_start, "end_s": new_end,
+                            "scene": seg["scene"]})
+            cumul += remaining
+    # Re-trier dans l'ordre temporel pour la narration
+    picked.sort(key=lambda s: s["start_s"])
+    return picked
+
+
 def select_best_clips(segments: list[dict],
                        max_total_duration_s: int = 210,
                        scene_durations: Optional[dict] = None) -> list[dict]:
     """Sélectionne et trim les clips pour respecter la durée cible.
 
-    Stratégie simple :
-        - Pour chaque scène, on prend au plus scene_durations[scene]
-          (ou SCENE_DURATIONS_CIBLE par défaut, possiblement snappé sur beats)
-        - On prend le milieu du segment (meilleur moment en général)
-        - On garde l'ordre narratif (briefing → ... → interaction_moniteur)
+    Stratégie multi-segment :
+        - Fusionne les segments adjacents de même scène
+        - Pour chaque scène, cumule plusieurs segments si nécessaire pour
+          atteindre la durée cible (au lieu d'un seul "best")
+        - Fallback positionnel : si "briefing"/"vehicule_embarquement"
+          manquent mais qu'un segment "montee_avion" couvre tout le début
+          de la vidéo, on subdivise ce gros segment en briefing/embarquement
+          /montée pour une vraie structure narrative.
     """
     durations = scene_durations or SCENE_DURATIONS_CIBLE
+    segments = _merge_adjacent(segments)
     # Order narratif
     order = ["briefing", "vehicule_embarquement", "montee_avion",
              "sortie_avion", "chute_libre", "sous_voile",
@@ -295,57 +369,125 @@ def select_best_clips(segments: list[dict],
         if scene in order:
             by_scene.setdefault(scene, []).append(seg)
 
+    # ─── Fallback positionnel : briefing/embarquement depuis le debut ───
+    # Probleme observe : Gemini classe souvent les frames du briefing comme
+    # "montee_avion" car elles sont au sol dans une zone de saut. On detecte
+    # un "gros" montee_avion (>40s) au debut de la video et on le decoupe.
+    if "montee_avion" in by_scene:
+        big_montee = max(by_scene["montee_avion"],
+                          key=lambda s: s["end_s"] - s["start_s"])
+        big_dur = big_montee["end_s"] - big_montee["start_s"]
+        # Si la "montee_avion" detectee couvre les 40+ premieres secondes,
+        # on la subdivise en briefing/embarquement/montee
+        if big_dur >= 40 and big_montee["start_s"] < 30:
+            seg_start = big_montee["start_s"]
+            seg_end = big_montee["end_s"]
+
+            # Briefing : tout debut
+            if not by_scene.get("briefing"):
+                briefing_dur = min(durations.get("briefing", 8),
+                                    big_dur * 0.20)
+                by_scene["briefing"] = [{
+                    "start_s": seg_start,
+                    "end_s": seg_start + briefing_dur,
+                    "scene": "briefing",
+                }]
+
+            # Embarquement : juste apres
+            if not by_scene.get("vehicule_embarquement"):
+                emb_start = seg_start + (durations.get("briefing", 8))
+                emb_dur = durations.get("vehicule_embarquement", 5)
+                by_scene["vehicule_embarquement"] = [{
+                    "start_s": emb_start,
+                    "end_s": emb_start + emb_dur,
+                    "scene": "vehicule_embarquement",
+                }]
+
+            # Montee avion vraie : derniers X secondes avant sortie
+            montee_dur = durations.get("montee_avion", 10)
+            new_montee_start = max(seg_start, seg_end - montee_dur)
+            by_scene["montee_avion"] = [{
+                "start_s": new_montee_start,
+                "end_s": seg_end,
+                "scene": "montee_avion",
+            }]
+
     out = []
     for scene in order:
         segs = by_scene.get(scene, [])
         if not segs:
             continue
-        # Garder le plus long segment de la scène
-        best = max(segs, key=lambda s: s["end_s"] - s["start_s"])
         target = durations.get(scene, 8)
-        seg_start = max(0.0, best["start_s"])
-        seg_end = max(seg_start, best["end_s"])
-        seg_dur = seg_end - seg_start
-
-        # Subdivision : decouper en N sous-clips pour plus de dynamisme
+        pos = SCENE_CLIP_POSITION.get(scene, "middle")
         n_sub = SCENE_SUBDIVIDE.get(scene, 1)
-        if n_sub > 1 and seg_dur >= n_sub * 2:  # au moins 2s par sous-clip
-            sub_target = target / n_sub
-            # Repartir N points equi-distribues sur le segment source
-            # (debut + (N-1) * pas)
-            usable_dur = max(0.0, seg_dur - sub_target)
-            for k in range(n_sub):
-                if n_sub == 1:
-                    sub_offset = 0.0
-                else:
-                    sub_offset = (usable_dur * k) / (n_sub - 1)
-                sub_start = seg_start + sub_offset
-                sub_end = min(seg_end, sub_start + sub_target)
-                out.append({"start_s": sub_start, "end_s": sub_end,
-                            "scene": scene})
-            continue  # passe a la scene suivante
 
-        # Pas de subdivision : 1 seul clip
-        if seg_dur <= target:
-            out.append({"start_s": seg_start,
-                        "end_s": seg_end, "scene": scene})
-        else:
-            pos = SCENE_CLIP_POSITION.get(scene, "middle")
-            if pos == "start":
-                new_start = seg_start
-                new_end = seg_start + target
-            elif pos == "end":
-                new_end = seg_end
-                new_start = max(seg_start, seg_end - target)
-            else:  # middle
-                mid = (seg_start + seg_end) / 2
-                half = target / 2
-                new_start = max(0.0, mid - half)
-                new_end = min(seg_end, new_start + target)
-                # Si on a rogné à gauche, décale à gauche pour garder target secs
-                if new_end - new_start < target:
-                    new_start = max(0.0, new_end - target)
-            out.append({"start_s": new_start, "end_s": new_end, "scene": scene})
+        # ─── Cas 1 : Subdivision avec PLUSIEURS segments distincts ───
+        # Ex: sous_voile detecte sur 9 segments differents -> on en prend 3
+        # qui sont espaces dans le temps (debut, milieu, fin) au lieu de
+        # decouper artificiellement un seul segment court.
+        if n_sub > 1 and len(segs) >= n_sub:
+            segs_sorted = sorted(segs, key=lambda s: s["start_s"])
+            sub_target = target / n_sub
+            # Picker N segments equi-repartis sur la liste
+            indices = [int(i * (len(segs_sorted) - 1) / (n_sub - 1))
+                        for i in range(n_sub)]
+            for idx in indices:
+                seg = segs_sorted[idx]
+                seg_dur = seg["end_s"] - seg["start_s"]
+                # Tronquer ce segment a sub_target depuis le debut
+                clip_dur = min(seg_dur, sub_target)
+                out.append({
+                    "start_s": seg["start_s"],
+                    "end_s": seg["start_s"] + clip_dur,
+                    "scene": scene,
+                })
+            continue
+
+        # ─── Cas 2 : Multi-segment cumule pour atteindre target ───
+        # On essaie de cumuler plusieurs segments de la meme scene si
+        # le plus long ne suffit pas a remplir target.
+        total_avail = sum(s["end_s"] - s["start_s"] for s in segs)
+        if total_avail >= target * 0.9:
+            # Assez de matiere : prendre plusieurs segments
+            picked = _take_target_from_scene(segs, target, pos)
+            out.extend(picked)
+            continue
+
+        # ─── Cas 3 : Pas assez de matiere -> extension contextuelle ───
+        # On etend le segment dans le voisinage temporel pour atteindre target.
+        # Direction d'extension selon la position narrative de la scene :
+        #   sortie_avion / atterrissage : extend en ARRIERE (avant le moment)
+        #   sous_voile : extend en AVANT
+        #   autres : extend symetrique
+        biggest = max(segs, key=lambda s: s["end_s"] - s["start_s"])
+        seg_start = biggest["start_s"]
+        seg_end = biggest["end_s"]
+        seg_dur = seg_end - seg_start
+        deficit = target - seg_dur
+
+        if deficit > 0:
+            extend_dir = {
+                "sortie_avion":   "backward",
+                "atterrissage":   "backward",
+                "sous_voile":     "forward",
+                "chute_libre":    "symmetric",
+                "reaction_emotion": "forward",
+                "interaction_moniteur": "forward",
+            }.get(scene, "symmetric")
+
+            if extend_dir == "backward":
+                seg_start = max(0.0, seg_start - deficit)
+            elif extend_dir == "forward":
+                seg_end = seg_end + deficit  # NB: pourra etre clamp par cut_clip
+            else:  # symmetric
+                seg_start = max(0.0, seg_start - deficit / 2)
+                seg_end = seg_end + deficit / 2
+
+        out.append({
+            "start_s": seg_start,
+            "end_s": seg_end,
+            "scene": scene,
+        })
     return out
 
 
