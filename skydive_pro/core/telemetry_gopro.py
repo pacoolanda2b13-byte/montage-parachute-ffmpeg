@@ -69,6 +69,9 @@ class SkydiveAnalysis:
     altitude_min_m: Optional[float]
     vitesse_max_kmh: Optional[float]
     duree_chute_libre_s: Optional[float]
+    chute_start_s: Optional[float] = None  # NEW : t. exact debut chute libre
+    chute_end_s: Optional[float] = None    # NEW : t. exact ouverture parachute
+    atterrissage_start_s: Optional[float] = None  # NEW : t. exact atterrissage
     phases: list[PhaseInterval] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
     telemetry_disponible: bool = True
@@ -80,6 +83,9 @@ class SkydiveAnalysis:
             "altitude_min_m": self.altitude_min_m,
             "vitesse_max_kmh": self.vitesse_max_kmh,
             "duree_chute_libre_s": self.duree_chute_libre_s,
+            "chute_start_s": self.chute_start_s,
+            "chute_end_s": self.chute_end_s,
+            "atterrissage_start_s": self.atterrissage_start_s,
             "telemetry_disponible": self.telemetry_disponible,
             "phases": [asdict(p) for p in self.phases],
             "stats": self.stats,
@@ -371,7 +377,67 @@ def analyze_skydive(samples: list[TelemetrySample]) -> SkydiveAnalysis:
     vitesse_max_kmh = round(max(speeds) * 3.6, 1) if speeds else None
     duree = samples[-1].time_s - samples[0].time_s
 
-    # Détection chute libre
+    # ─── Detection PRECISE du chute_start via altitude max ───
+    # En tandem, on monte en avion jusqu'au palier (~4000m), puis on
+    # saute. Le timestamp où l'altitude max est atteinte = chute_start.
+    chute_start_s = None
+    chute_end_s = None
+    atter_start_s = None
+    if altitudes and altitude_max:
+        # Trouver le 1er sample qui atteint au moins 95% de l'altitude max
+        threshold_high = altitude_max * 0.95
+        for s in samples:
+            if s.altitude_m is not None and s.altitude_m >= threshold_high:
+                chute_start_s = s.time_s
+                break
+
+        # Detecter l'ouverture parachute = transition entre chute libre
+        # (descente rapide ~50m/s) et sous voile (descente lente ~5m/s).
+        # Approche : chercher le moment ou la pente d'altitude diminue
+        # significativement (de -50m/s a -5m/s).
+        if chute_start_s is not None:
+            samples_after_chute = [
+                s for s in samples
+                if s.time_s > chute_start_s and s.altitude_m is not None
+            ]
+            # Calcul vitesse verticale par segments de 1s
+            if len(samples_after_chute) >= 10:
+                window_s = 2.0
+                for i in range(len(samples_after_chute) - 1):
+                    s_now = samples_after_chute[i]
+                    s_after = next((s for s in samples_after_chute[i+1:]
+                                     if s.time_s - s_now.time_s >= window_s),
+                                    None)
+                    if not s_after:
+                        break
+                    dh = s_now.altitude_m - s_after.altitude_m
+                    dt = s_after.time_s - s_now.time_s
+                    vz = dh / dt if dt > 0 else 0  # m/s positif = descend
+                    # Si vitesse de descente < 15 m/s -> sous voile
+                    if vz < 15 and s_now.time_s > chute_start_s + 10:
+                        chute_end_s = s_now.time_s
+                        break
+
+        # Detecter atterrissage = altitude proche du min stable
+        if altitude_min is not None:
+            threshold_low = altitude_min + 30
+            for s in reversed(samples):
+                if (s.altitude_m is not None and
+                        s.altitude_m <= threshold_low and
+                        chute_start_s is not None and
+                        s.time_s > chute_start_s + 30):
+                    atter_start_s = s.time_s
+            # Si on a trouve, on prend le 1er sample qui descend sous threshold
+            if atter_start_s is not None:
+                for s in samples:
+                    if (s.altitude_m is not None and
+                            s.altitude_m <= threshold_low and
+                            chute_start_s is not None and
+                            s.time_s > chute_start_s + 30):
+                        atter_start_s = s.time_s
+                        break
+
+    # Detection chute libre via accelerometre (legacy, pour duree_s)
     phases = []
     chute_libre_duree = 0.0
     in_ff = False
@@ -396,12 +462,24 @@ def analyze_skydive(samples: list[TelemetrySample]) -> SkydiveAnalysis:
                                     round(last_t, 2)))
         chute_libre_duree += last_t - ff_start
 
+    # Si la detection accel n'a rien donne mais qu'on a chute_start/end
+    # via altitude, on l'ajoute aux phases
+    if not phases and chute_start_s is not None and chute_end_s is not None:
+        phases.append(PhaseInterval("chute_libre",
+                                     round(chute_start_s, 2),
+                                     round(chute_end_s, 2)))
+        chute_libre_duree = chute_end_s - chute_start_s
+
     return SkydiveAnalysis(
         duree_totale_s=duree,
         altitude_max_m=altitude_max,
         altitude_min_m=altitude_min,
         vitesse_max_kmh=vitesse_max_kmh,
         duree_chute_libre_s=round(chute_libre_duree, 2) or None,
+        chute_start_s=round(chute_start_s, 2) if chute_start_s else None,
+        chute_end_s=round(chute_end_s, 2) if chute_end_s else None,
+        atterrissage_start_s=(round(atter_start_s, 2)
+                                if atter_start_s else None),
         phases=phases,
         stats={
             "nb_samples": len(samples),

@@ -381,7 +381,9 @@ def _take_target_from_scene(segs_for_scene: list[dict], target: float,
 def select_best_clips(segments: list[dict],
                        max_total_duration_s: int = 320,
                        scene_durations: Optional[dict] = None,
-                       video_duration_s: Optional[float] = None
+                       video_duration_s: Optional[float] = None,
+                       telemetry_chute_start_s: Optional[float] = None,
+                       telemetry_atter_start_s: Optional[float] = None,
                        ) -> list[dict]:
     """Selection POSITIONNELLE garantissant l'ordre temporel narratif.
 
@@ -411,22 +413,32 @@ def select_best_clips(segments: list[dict],
         log.warning("select_best_clips: video_duration_s inconnue")
         return []
 
-    # ─── 2. Identifier les marqueurs cles via Gemini ───
+    # ─── 2. Identifier les marqueurs cles ───
+    # Priorite : telemetrie (precis ±0.1s) > Gemini (approximatif ±15s)
     chute_segs = [s for s in segments if s.get("scene") == "chute_libre"]
     atter_segs = [s for s in segments if s.get("scene") == "atterrissage"]
 
-    if chute_segs:
+    if telemetry_chute_start_s is not None:
+        chute_start = telemetry_chute_start_s
+        log.info("chute_start depuis TELEMETRIE : %.1fs (precis)",
+                  chute_start)
+    elif chute_segs:
         chute_start = min(s["start_s"] for s in chute_segs)
+        log.info("chute_start depuis Gemini : %.1fs (approximatif)",
+                  chute_start)
     else:
-        # Pas de chute detectee : on suppose qu'elle commence a 30% video
         chute_start = video_duration_s * 0.30
         log.warning("Pas de chute_libre detectee — fallback chute_start=%.1fs",
                      chute_start)
 
-    if atter_segs:
+    if telemetry_atter_start_s is not None:
+        atter_start = telemetry_atter_start_s
+        log.info("atter_start depuis TELEMETRIE : %.1fs (precis)",
+                  atter_start)
+    elif atter_segs:
         atter_start = min(s["start_s"] for s in atter_segs)
+        log.info("atter_start depuis Gemini : %.1fs", atter_start)
     else:
-        # Pas d'atterrissage : 35s avant la fin
         atter_start = max(chute_start + 90, video_duration_s - 35)
         log.warning("Pas d'atterrissage detecte — fallback atter_start=%.1fs",
                      atter_start)
@@ -473,22 +485,61 @@ def select_best_clips(segments: list[dict],
             paysage_d *= scale
             montee_d *= scale
 
-    # Cursor temporel dans la video source
-    cursor = 0.0
-    out.append({"start_s": cursor, "end_s": cursor + briefing_d,
-                "scene": "briefing"})
-    cursor += briefing_d
-    out.append({"start_s": cursor, "end_s": cursor + embarq_d,
-                "scene": "vehicule_embarquement"})
-    cursor += embarq_d
-    out.append({"start_s": cursor, "end_s": cursor + dans_avion_d,
-                "scene": "dans_avion"})
-    cursor += dans_avion_d
-    out.append({"start_s": cursor, "end_s": cursor + paysage_d,
-                "scene": "paysage_avion"})
-    # Montee : les derniers montee_d secondes avant la sortie
+    # POSITIONNEMENT INTELLIGENT du pre-saut :
+    # briefing + embarquement = DEBUT de la video (zones briefing au sol)
+    # dans_avion + paysage_avion = JUSTE AVANT la montee finale
+    # (le paysage par hublot et les passagers en vol arrivent
+    # naturellement vers la fin du pre-saut, pas au debut)
+    # montee = les 5s juste avant la sortie
+
     sortie_start = chute_start - sortie_d
-    out.append({"start_s": sortie_start - montee_d, "end_s": sortie_start,
+    # Calculer les positions en remontant depuis la sortie
+    montee_end = sortie_start
+    montee_start = montee_end - montee_d
+    paysage_end = montee_start
+    paysage_start = paysage_end - paysage_d
+    dans_avion_end = paysage_start
+    dans_avion_start = dans_avion_end - dans_avion_d
+
+    # Si pre-saut trop court, on commence dans_avion juste apres
+    # l'embarquement (cas video courte)
+    embarq_end = briefing_d + embarq_d
+    if dans_avion_start < embarq_end:
+        # Compresser : positionner dans_avion juste apres embarquement
+        dans_avion_start = embarq_end
+        dans_avion_end = dans_avion_start + dans_avion_d
+        paysage_start = dans_avion_end
+        paysage_end = paysage_start + paysage_d
+        montee_start = max(paysage_end, sortie_start - montee_d)
+        montee_end = sortie_start
+
+    # Briefing : tout debut de video
+    out.append({"start_s": 0.0, "end_s": briefing_d,
+                "scene": "briefing"})
+    # Embarquement : centre dans la zone [briefing_d, dans_avion_start]
+    # (cette zone correspond au "trou" entre briefing et avion, qui
+    # contient typiquement la marche vers le vehicule + le trajet vers
+    # l'avion)
+    embarq_zone_start = briefing_d
+    embarq_zone_end = max(briefing_d + embarq_d, dans_avion_start)
+    embarq_zone_dur = embarq_zone_end - embarq_zone_start
+    if embarq_zone_dur > embarq_d * 2:
+        # Zone large : centre l'embarquement dans la zone
+        emb_offset = (embarq_zone_dur - embarq_d) / 2
+        emb_start = embarq_zone_start + emb_offset
+    else:
+        # Zone serree : juste apres briefing
+        emb_start = embarq_zone_start
+    out.append({"start_s": emb_start, "end_s": emb_start + embarq_d,
+                "scene": "vehicule_embarquement"})
+    # Dans avion : interieur cabine (positionne en remontant depuis sortie)
+    out.append({"start_s": dans_avion_start, "end_s": dans_avion_end,
+                "scene": "dans_avion"})
+    # Paysage : vue hublot, juste avant la montee finale
+    out.append({"start_s": paysage_start, "end_s": paysage_end,
+                "scene": "paysage_avion"})
+    # Montee : les 5s juste avant la sortie
+    out.append({"start_s": montee_start, "end_s": montee_end,
                 "scene": "montee_avion"})
 
     # Sortie d'avion
@@ -787,6 +838,8 @@ def build_montage(video_source: str | Path,
                    width: int = 1920, height: int = 1080, fps: int = 30,
                    beat_sync: bool = True,
                    fade_duration_s: float = 0.4,
+                   telemetry_chute_start_s: Optional[float] = None,
+                   telemetry_atter_start_s: Optional[float] = None,
                    ) -> Path:
     """Construit le montage final à partir des segments sélectionnés.
 
@@ -833,10 +886,16 @@ def build_montage(video_source: str | Path,
         video_duration_s = None
 
     # 2. Selection POSITIONNELLE : decoupage sequentiel garanti dans
-    #    l'ordre temporel de la video source
-    best = select_best_clips(segments, max_total_duration_s=max_duration_s,
-                              scene_durations=durations,
-                              video_duration_s=video_duration_s)
+    #    l'ordre temporel de la video source. Priorite : marqueurs
+    #    telemetrie (precis) > marqueurs Gemini (approximatifs).
+    best = select_best_clips(
+        segments,
+        max_total_duration_s=max_duration_s,
+        scene_durations=durations,
+        video_duration_s=video_duration_s,
+        telemetry_chute_start_s=telemetry_chute_start_s,
+        telemetry_atter_start_s=telemetry_atter_start_s,
+    )
 
     # 2. Couper chaque clip + intro/stats/outro
     tmpdir = Path(tempfile.mkdtemp(prefix="montage_"))

@@ -197,6 +197,12 @@ def process_jump(video_path: str | Path,
         t = _timer()
         try:
             output_file = output_dir / f"{job_id}_{Path(video_path).stem}_montage.mp4"
+            # Marqueurs telemetrie pour la strategie positionnelle :
+            # priorite haute car bcp plus fiable que Gemini
+            telemetry_chute_start = (analysis.chute_start_s
+                                       if analysis else None)
+            telemetry_atter_start = (analysis.atterrissage_start_s
+                                       if analysis else None)
             build_montage(
                 video_source=video_path,
                 segments=segments,
@@ -206,6 +212,8 @@ def process_jump(video_path: str | Path,
                 stats_overlay=stats,
                 music_path=music_path,
                 max_duration_s=max_duration_s,
+                telemetry_chute_start_s=telemetry_chute_start,
+                telemetry_atter_start_s=telemetry_atter_start,
             )
             if output_file.exists():
                 result.fichier_montage = str(output_file)
