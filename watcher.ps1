@@ -195,10 +195,14 @@ function Start-PipelineFor {
     Write-Host ("-" * 78) -ForegroundColor Magenta
 
     $startTime = Get-Date
-    $pipeArgs = @()
-    if ($NoVision) { $pipeArgs += "-NoVision" }
-    if ($Force) { $pipeArgs += "-Force" }
-    $pipeArgs += @("-Dropzone", $Dropzone, "-Site", $Site, "-MaxDuration", $MaxDuration)
+    # Splat avec hashtable pour preserver le pairing key/value
+    $pipeArgs = @{
+        Dropzone = $Dropzone
+        Site = $Site
+        MaxDuration = $MaxDuration
+    }
+    if ($NoVision) { $pipeArgs.NoVision = $true }
+    if ($Force) { $pipeArgs.Force = $true }
 
     & $ProcessAllScript @pipeArgs
 
