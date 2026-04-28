@@ -355,9 +355,69 @@ def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
         log.error("Configuration Gemini (nouveau SDK) échouée: %s", e)
         return []
 
+    # Modèles de fallback ordonnés (du plus puissant au plus léger).
+    # Si le modèle principal renvoie 503 (surcharge), on essaie les suivants.
+    fallback_models = [model_name]
+    for alt in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
+        if alt not in fallback_models:
+            fallback_models.append(alt)
+
+    def _call_gemini_with_retry(t: int, img_bytes: bytes,
+                                  max_retries: int = 3):
+        """Appel Gemini avec retry exponentiel sur 503 + fallback modèle.
+
+        Returns: response object ou None si tous les essais ont échoué.
+        """
+        last_err = None
+        for attempt in range(max_retries):
+            for current_model in fallback_models:
+                try:
+                    if use_new_sdk:
+                        from google.genai import types as genai_types
+                        return new_client.models.generate_content(
+                            model=current_model,
+                            contents=[
+                                genai_types.Part.from_bytes(
+                                    data=img_bytes, mime_type="image/jpeg"
+                                ),
+                                _GEMINI_PROMPT,
+                            ],
+                        ), current_model
+                    else:
+                        img_b64 = base64.b64encode(img_bytes).decode("ascii")
+                        return old_model.generate_content([
+                            {"mime_type": "image/jpeg", "data": img_b64},
+                            _GEMINI_PROMPT,
+                        ]), current_model
+                except Exception as e:
+                    last_err = e
+                    err_str = str(e)
+                    # 503 = surcharge → fallback immédiat sur modèle suivant
+                    if "503" in err_str or "UNAVAILABLE" in err_str.upper():
+                        continue
+                    # 429 quota → propagation (gérée plus haut, court-circuit)
+                    if ("429" in err_str or "quota" in err_str.lower()
+                            or "rate limit" in err_str.lower()):
+                        raise
+                    # Autres erreurs : on tente le modèle suivant aussi
+                    continue
+            # Tous les modèles ont échoué pour cet attempt → backoff
+            if attempt < max_retries - 1:
+                import time as _time
+                wait = 2 ** attempt  # 1s, 2s, 4s
+                log.info("Gemini @ t=%ds : tous modèles 503/erreur, "
+                          "retry dans %ds (attempt %d/%d)",
+                          t, wait, attempt + 1, max_retries)
+                _time.sleep(wait)
+        # Tous les retries épuisés
+        if last_err:
+            raise last_err
+        return None, None
+
     results = []
     fails = 0
     quota_exhausted = False
+    model_usage = {}
     for t, fpath in frames:
         # Coupe court si quota épuisé (évite 20 retries à 30s chacun)
         if quota_exhausted:
@@ -368,24 +428,8 @@ def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
             with open(fpath, "rb") as f:
                 img_bytes = f.read()
 
-            if use_new_sdk:
-                # Nouveau SDK : Part.from_bytes accepte directement les bytes
-                from google.genai import types as genai_types
-                response = new_client.models.generate_content(
-                    model=model_name,
-                    contents=[
-                        genai_types.Part.from_bytes(
-                            data=img_bytes, mime_type="image/jpeg"
-                        ),
-                        _GEMINI_PROMPT,
-                    ],
-                )
-            else:
-                img_b64 = base64.b64encode(img_bytes).decode("ascii")
-                response = old_model.generate_content([
-                    {"mime_type": "image/jpeg", "data": img_b64},
-                    _GEMINI_PROMPT,
-                ])
+            response, used_model = _call_gemini_with_retry(t, img_bytes)
+            model_usage[used_model] = model_usage.get(used_model, 0) + 1
             text = (response.text or "").strip()
             # Nettoyer markdown si présent
             if text.startswith("```"):
@@ -427,6 +471,9 @@ def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
     if fails == len(frames) and frames:
         log.error("Gemini : 100%% des frames ont échoué (%d/%d)",
                   fails, len(frames))
+    if model_usage:
+        usage_str = ", ".join(f"{m}={n}" for m, n in model_usage.items())
+        log.info("Gemini: répartition des appels par modèle — %s", usage_str)
 
     return results
 
