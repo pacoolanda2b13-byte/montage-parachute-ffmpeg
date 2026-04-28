@@ -1,33 +1,21 @@
 # ============================================================================
-#  SkyDive Pro — Watcher automatique
+#  SkyDive Pro - Watcher automatique
 # ============================================================================
 #  Surveille en permanence skydive_pro/sources/ et lance automatiquement
-#  process_all.ps1 dès qu'un nouveau saut est détecté et stable
-#  (= copie terminée).
+#  process_all.ps1 des qu'un nouveau saut est detecte et stable
+#  (= copie terminee).
 #
 #  Usage :
-#    .\watcher.ps1                  # Démarre le watcher (Ctrl+C pour arrêter)
-#    .\watcher.ps1 -Interval 60     # Vérifie toutes les 60s (défaut: 30s)
+#    .\watcher.ps1                  # Demarre le watcher (Ctrl+C pour arreter)
+#    .\watcher.ps1 -Interval 60     # Verifie toutes les 60s (defaut: 30s)
 #    .\watcher.ps1 -NoVision        # Mode rapide
-#    .\watcher.ps1 -OpenWhenDone    # Ouvre le montage quand prêt
-#
-#  Comment ça marche :
-#    1. Le watcher tourne en boucle (polling toutes les 30s par défaut)
-#    2. À chaque tick, il liste sources/ et output/
-#    3. Pour chaque saut potentiel (sous-dossier avec MP4 OU fichier MP4) :
-#       - Vérifie que la taille n'a pas changé depuis 60s = copie finie
-#       - Vérifie qu'il n'a pas déjà été traité (montage absent)
-#       - Si OUI les 2 -> lance le pipeline, attend la fin
-#    4. Notification + ouverture auto du montage (option)
-#    5. Reprend la surveillance
-#
-#  Pour ARRÊTER : Ctrl+C dans la fenêtre PowerShell
+#    .\watcher.ps1 -OpenWhenDone    # Ouvre le montage quand pret
 # ============================================================================
 
 [CmdletBinding()]
 param(
-    [int]$Interval = 30,           # Polling interval en secondes
-    [int]$StableDelay = 60,        # Délai pour considérer un fichier "stable"
+    [int]$Interval = 30,
+    [int]$StableDelay = 60,
     [string]$Dropzone = "SkyDive Pro",
     [string]$Site = "skydive-pro.fr",
     [int]$MaxDuration = 320,
@@ -36,38 +24,36 @@ param(
     [switch]$Force
 )
 
-$ErrorActionPreference = "Continue"  # ne PAS s'arrêter sur la moindre erreur
+$ErrorActionPreference = "Continue"
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectDir = Join-Path $RootDir "skydive_pro"
 $SourcesDir = Join-Path $ProjectDir "sources"
 $OutputDir = Join-Path $ProjectDir "output"
 $ProcessAllScript = Join-Path $RootDir "process_all.ps1"
 
-# Hash table : nom -> { lastSize, lastSeen, processed }
-# On garde un historique pour détecter quand un fichier devient stable
 $state = @{}
 
 function Write-Header {
     Clear-Host
     Write-Host ""
-    Write-Host ("█" * 78) -ForegroundColor Cyan
-    Write-Host "  🪂 SkyDive Pro — Watcher automatique" -ForegroundColor Cyan
-    Write-Host ("█" * 78) -ForegroundColor Cyan
+    Write-Host ("=" * 78) -ForegroundColor Cyan
+    Write-Host "  SkyDive Pro - Watcher automatique" -ForegroundColor Cyan
+    Write-Host ("=" * 78) -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "  Dossier surveillé : $SourcesDir" -ForegroundColor Gray
-    Write-Host "  Polling          : toutes les $Interval s" -ForegroundColor Gray
-    Write-Host "  Délai stable     : $StableDelay s" -ForegroundColor Gray
-    $modeStr = if ($NoVision) { "Rapide (sans vision Gemini)" } else { "Qualité (avec vision Gemini)" }
-    Write-Host "  Mode             : $modeStr" -ForegroundColor Gray
+    Write-Host "  Dossier surveille : $SourcesDir" -ForegroundColor Gray
+    Write-Host "  Polling           : toutes les $Interval s" -ForegroundColor Gray
+    Write-Host "  Delai stable      : $StableDelay s" -ForegroundColor Gray
+    $modeStr = if ($NoVision) { "Rapide (sans vision Gemini)" } else { "Qualite (avec vision Gemini)" }
+    Write-Host "  Mode              : $modeStr" -ForegroundColor Gray
     Write-Host ""
-    Write-Host "  💡 Comment l'utiliser :" -ForegroundColor Yellow
-    Write-Host "     Copie tes vidéos GoPro dans un sous-dossier de sources/" -ForegroundColor Yellow
+    Write-Host "  Comment l'utiliser :" -ForegroundColor Yellow
+    Write-Host "     Copie tes videos GoPro dans un sous-dossier de sources/" -ForegroundColor Yellow
     Write-Host "     Ex: sources/SOPHIE/GH015XXX.MP4" -ForegroundColor Yellow
-    Write-Host "     Le watcher détecte, attend la fin de la copie, et traite." -ForegroundColor Yellow
+    Write-Host "     Le watcher detecte, attend la fin de la copie, et traite." -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "  ⏹️  ARRÊTER : Ctrl+C" -ForegroundColor Yellow
+    Write-Host "  ARRETER : Ctrl+C dans cette fenetre" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host ("=" * 78) -ForegroundColor DarkGray
+    Write-Host ("-" * 78) -ForegroundColor DarkGray
 }
 
 function Get-FolderSize {
@@ -80,21 +66,18 @@ function Get-FolderSize {
 function Test-AlreadyProcessed {
     param([string]$Stem)
     $pattern = "*$Stem*_montage.mp4"
-    $existing = @(Get-ChildItem -Path $OutputDir -Filter $pattern -File `
-        -ErrorAction SilentlyContinue)
+    $existing = @(Get-ChildItem -Path $OutputDir -Filter $pattern -File -ErrorAction SilentlyContinue)
     return $existing.Count -gt 0
 }
 
 function Get-AllSauts {
-    # Retourne la liste des "sauts" candidats : sous-dossiers + fichiers MP4
     $items = @()
 
     # Sous-dossiers avec au moins 1 MP4
     $subDirs = Get-ChildItem -Path $SourcesDir -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -notlike ".*" -and $_.Name -notlike "wetransfer*" }
     foreach ($d in $subDirs) {
-        $mp4Count = @(Get-ChildItem -Path $d.FullName -File `
-            -ErrorAction SilentlyContinue |
+        $mp4Count = @(Get-ChildItem -Path $d.FullName -File -ErrorAction SilentlyContinue |
             Where-Object { $_.Extension -ieq ".mp4" -or $_.Extension -ieq ".mov" }).Count
         if ($mp4Count -gt 0) {
             $size = Get-FolderSize $d.FullName
@@ -109,9 +92,8 @@ function Get-AllSauts {
         }
     }
 
-    # Fichiers MP4 à plat
-    $flatVideos = @(Get-ChildItem -Path $SourcesDir -File `
-        -ErrorAction SilentlyContinue |
+    # Fichiers MP4 a plat
+    $flatVideos = @(Get-ChildItem -Path $SourcesDir -File -ErrorAction SilentlyContinue |
         Where-Object {
             ($_.Extension -ieq ".mp4" -or $_.Extension -ieq ".mov") -and
             $_.Name -notlike "concat_*" -and $_.Name -notlike "saut_client_*"
@@ -133,9 +115,9 @@ function Show-Status {
     param([array]$Sauts)
     $now = Get-Date -Format "HH:mm:ss"
     Write-Host ""
-    Write-Host "[$now] État actuel :" -ForegroundColor Cyan
+    Write-Host "[$now] Etat actuel :" -ForegroundColor Cyan
     if ($Sauts.Count -eq 0) {
-        Write-Host "       (sources/ vide — en attente)" -ForegroundColor DarkGray
+        Write-Host "       (sources/ vide - en attente)" -ForegroundColor DarkGray
         return
     }
     foreach ($s in $Sauts) {
@@ -144,33 +126,32 @@ function Show-Status {
         $entry = $state[$stKey]
 
         if (Test-AlreadyProcessed $s.Stem) {
-            $statusEmoji = "✅"
-            $statusText = "déjà traité"
+            $tag = "[OK]   "
+            $statusText = "deja traite"
             $color = "DarkGray"
         } elseif ($null -eq $entry) {
-            $statusEmoji = "🆕"
+            $tag = "[NEW]  "
             $statusText = "nouveau (analyse en cours)"
             $color = "Yellow"
         } elseif ($entry.LastSize -ne $s.Size) {
-            $statusEmoji = "📥"
+            $tag = "[COPY] "
             $statusText = "copie en cours ($sizeMB MB)"
             $color = "Yellow"
         } else {
             $elapsed = ((Get-Date) - $entry.LastChange).TotalSeconds
             if ($elapsed -lt $StableDelay) {
                 $remaining = [math]::Round($StableDelay - $elapsed, 0)
-                $statusEmoji = "⏳"
+                $tag = "[WAIT] "
                 $statusText = "stabilisation ($remaining s restantes)"
                 $color = "Yellow"
             } else {
-                $statusEmoji = "🚀"
-                $statusText = "PRÊT À TRAITER"
+                $tag = "[GO]   "
+                $statusText = "PRET A TRAITER"
                 $color = "Green"
             }
         }
-        $typeIcon = if ($s.Type -eq "folder") { "📁" } else { "📄" }
-        Write-Host ("       {0} {1} {2} ({3} MB) — {4}" -f `
-            $statusEmoji, $typeIcon, $s.Key, $sizeMB, $statusText) -ForegroundColor $color
+        $typeTag = if ($s.Type -eq "folder") { "DIR " } else { "FILE" }
+        Write-Host ("       {0} {1} {2} ({3} MB) - {4}" -f $tag, $typeTag, $s.Key, $sizeMB, $statusText) -ForegroundColor $color
     }
 }
 
@@ -181,19 +162,16 @@ function Update-State {
         $entry = $state[$stKey]
 
         if ($null -eq $entry) {
-            # Première détection
             $state[$stKey] = @{
                 LastSize = $s.Size
                 LastChange = Get-Date
                 Processed = $false
             }
         } elseif ($entry.LastSize -ne $s.Size) {
-            # Taille a changé : copie en cours, on reset le timer
             $entry.LastSize = $s.Size
             $entry.LastChange = Get-Date
         }
     }
-    # Nettoyer les entries qui n'existent plus dans sources/
     $currentKeys = $Sauts | ForEach-Object { "$($_.Type)__$($_.Key)" }
     $toRemove = @($state.Keys | Where-Object { $_ -notin $currentKeys })
     foreach ($k in $toRemove) { $state.Remove($k) }
@@ -212,54 +190,48 @@ function Test-IsStable {
 function Start-PipelineFor {
     param($Saut)
     Write-Host ""
-    Write-Host ("─" * 78) -ForegroundColor Magenta
-    Write-Host "🎬 LANCEMENT DU PIPELINE pour $($Saut.Key)" -ForegroundColor Magenta
-    Write-Host ("─" * 78) -ForegroundColor Magenta
+    Write-Host ("-" * 78) -ForegroundColor Magenta
+    Write-Host ">>> LANCEMENT DU PIPELINE pour $($Saut.Key)" -ForegroundColor Magenta
+    Write-Host ("-" * 78) -ForegroundColor Magenta
 
     $startTime = Get-Date
-    # On délègue à process_all.ps1 (qui sait gérer concat + skip + validation)
-    $args = @()
-    if ($NoVision) { $args += "-NoVision" }
-    if ($Force) { $args += "-Force" }
-    $args += @("-Dropzone", $Dropzone, "-Site", $Site,
-                "-MaxDuration", $MaxDuration)
+    $pipeArgs = @()
+    if ($NoVision) { $pipeArgs += "-NoVision" }
+    if ($Force) { $pipeArgs += "-Force" }
+    $pipeArgs += @("-Dropzone", $Dropzone, "-Site", $Site, "-MaxDuration", $MaxDuration)
 
-    & $ProcessAllScript @args
+    & $ProcessAllScript @pipeArgs
 
     $duration = ((Get-Date) - $startTime).TotalSeconds
     Write-Host ""
-    Write-Host "✅ Traitement terminé en $([math]::Round($duration, 0))s" -ForegroundColor Green
+    Write-Host "[OK] Traitement termine en $([math]::Round($duration, 0))s" -ForegroundColor Green
 
-    # Toast notification Windows
+    # Toast Windows
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
         $balloon = New-Object System.Windows.Forms.NotifyIcon
         $balloon.Icon = [System.Drawing.SystemIcons]::Information
         $balloon.BalloonTipTitle = "SkyDive Pro"
-        $balloon.BalloonTipText = "Montage prêt : $($Saut.Key)"
+        $balloon.BalloonTipText = "Montage pret : $($Saut.Key)"
         $balloon.Visible = $true
         $balloon.ShowBalloonTip(5000)
         Start-Sleep -Seconds 1
         $balloon.Dispose()
     } catch { }
 
-    # Optionnel : ouvrir le montage
     if ($OpenWhenDone) {
         $pattern = "*$($Saut.Stem)*_montage.mp4"
-        $latest = Get-ChildItem -Path $OutputDir -Filter $pattern -File `
-            -ErrorAction SilentlyContinue |
+        $latest = Get-ChildItem -Path $OutputDir -Filter $pattern -File -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
         if ($latest) {
-            Write-Host "📺 Ouverture du montage..." -ForegroundColor Cyan
+            Write-Host "[PLAY] Ouverture du montage..." -ForegroundColor Cyan
             Start-Process $latest.FullName
         }
     }
 }
 
-# ─── BOUCLE PRINCIPALE ─────────────────────────────────────────────────────
-
-# Pré-flight : vérifie process_all.ps1 existe
+# Pre-flight
 if (-not (Test-Path $ProcessAllScript)) {
     Write-Host "[ERR] $ProcessAllScript introuvable. Annulation." -ForegroundColor Red
     exit 1
@@ -274,15 +246,12 @@ try {
         $sauts = @(Get-AllSauts)
         Update-State $sauts
 
-        # Affiche l'état toutes les 5 ticks (sinon trop verbeux) ou au 1er tick
         if ($tickCount -eq 1 -or $tickCount % 5 -eq 0) {
             Show-Status $sauts
             $nextTick = (Get-Date).AddSeconds($Interval).ToString("HH:mm:ss")
-            Write-Host "[INFO] Prochain check : $nextTick (Ctrl+C pour arrêter)" `
-                -ForegroundColor DarkGray
+            Write-Host "[INFO] Prochain check : $nextTick (Ctrl+C pour arreter)" -ForegroundColor DarkGray
         }
 
-        # Détecte les sauts prêts à traiter
         $readyToProcess = @($sauts | Where-Object {
             (Test-IsStable $_) -and
             ((-not (Test-AlreadyProcessed $_.Stem)) -or $Force)
@@ -290,7 +259,6 @@ try {
 
         foreach ($saut in $readyToProcess) {
             Start-PipelineFor $saut
-            # Marque le saut comme traité (évite re-traiter au prochain tick)
             $stKey = "{0}__{1}" -f $saut.Type, $saut.Key
             if ($state.ContainsKey($stKey)) {
                 $state[$stKey].Processed = $true
@@ -301,6 +269,6 @@ try {
     }
 } finally {
     Write-Host ""
-    Write-Host "🛑 Watcher arrêté." -ForegroundColor Yellow
+    Write-Host "[STOP] Watcher arrete." -ForegroundColor Yellow
     Write-Host ""
 }
