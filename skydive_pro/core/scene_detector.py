@@ -267,6 +267,16 @@ def extract_keyframes(video_path: str | Path,
         log.warning("ffprobe durée a échoué sur %s: %s", video_path, e)
         return []
 
+    # Adaptive keyframe interval : plafonne le nombre de frames pour
+    # ne pas exploser le coût Gemini sur des videos tres longues.
+    # Cible : 25-40 frames max, donc interval ~= duration / 35.
+    MAX_KEYFRAMES = 40
+    if duration / every_n_sec > MAX_KEYFRAMES:
+        adapted = int(duration / MAX_KEYFRAMES) + 1
+        log.info("Adaptive keyframe : duration=%.0fs, interval %d -> %ds "
+                  "(cap %d frames)",
+                  duration, every_n_sec, adapted, MAX_KEYFRAMES)
+        every_n_sec = adapted
     timestamps = list(range(0, int(duration), every_n_sec))
     frames = []
     fails = 0
@@ -480,6 +490,23 @@ def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
     if model_usage:
         usage_str = ", ".join(f"{m}={n}" for m, n in model_usage.items())
         log.info("Gemini: répartition des appels par modèle — %s", usage_str)
+
+    # DISTRIBUTION DES SCENES CLASSIFIEES (signal cle de qualite Gemini)
+    # Si une scene domine massivement (>70% des frames), c'est suspect.
+    if results:
+        from collections import Counter
+        scene_counter = Counter(r.get("scene", "?") for r in results)
+        total = len(results)
+        dist_str = ", ".join(f"{s}={n}({100*n/total:.0f}%)"
+                              for s, n in scene_counter.most_common())
+        log.info("Gemini distribution scenes : %s", dist_str)
+        # Alerte si mono-scene domine
+        top_scene, top_count = scene_counter.most_common(1)[0]
+        if total >= 5 and top_count / total > 0.7 and top_scene != "erreur":
+            log.warning("Gemini Q-WARNING : '%s' domine (%.0f%%) — "
+                         "classification probablement biaisee. "
+                         "Le pipeline va probablement utiliser un fallback.",
+                         top_scene, 100 * top_count / total)
 
     return results
 

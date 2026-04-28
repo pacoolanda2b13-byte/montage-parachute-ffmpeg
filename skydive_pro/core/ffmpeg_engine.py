@@ -218,8 +218,14 @@ def _mix_music(video_path: Path, music_path: Path, out_path: Path,
     ]
     try:
         subprocess.run(cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError:
-        # Fallback ultime : copier la vidéo sans musique
+    except subprocess.CalledProcessError as e:
+        # Fallback : copier la video sans musique. ATTENTION : silencieux
+        # pour le user, donc on log MAXIMUM pour permettre le diag posteriori.
+        err_str = (e.stderr or b"").decode("utf-8", errors="replace")[:1000]
+        log.error("_mix_music ECHEC : video=%s music=%s -> output COPIE "
+                   "SANS MUSIQUE. Stderr ffmpeg: %s",
+                   video_path.name, music_path.name, err_str)
+        log.error("_mix_music: cmd qui a echoue : %s", " ".join(cmd))
         import shutil as _sh
         _sh.copy(str(video_path), str(out_path))
     return out_path
@@ -277,107 +283,6 @@ SCENE_SUBDIVIDE = {
 }
 
 
-def _resolve_overlaps(clips: list[dict], overlap_threshold: float = 5.0
-                       ) -> list[dict]:
-    """Resout les chevauchements temporels MAJEURS entre clips.
-
-    Ne coupe que si l'overlap est >= overlap_threshold secondes.
-    Sinon, on accepte les petits chevauchements (transitions cinema OK).
-
-    Cette logique evite que `_resolve_overlaps` ne mange des scenes
-    entieres a cause d'un chevauchement de quelques secondes.
-    """
-    if len(clips) < 2:
-        return clips
-    # Conserver l'ordre narratif d'origine (selon SCENE order)
-    # On ne tri PAS par start_s pour preserver l'ordre de scene.
-    resolved = [dict(clips[0])]
-    for c in clips[1:]:
-        prev = resolved[-1]
-        # Chevauchement detecte uniquement si c.start < prev.end
-        # ET overlap est consequent (>= overlap_threshold secs)
-        overlap = prev["end_s"] - c["start_s"]
-        if overlap >= overlap_threshold:
-            # Tronquer le precedent juste avant le suivant
-            new_prev_end = c["start_s"]
-            if new_prev_end > prev["start_s"] + 1.0:  # garde >= 1s
-                prev["end_s"] = new_prev_end
-        # Sinon : on accepte le petit chevauchement (= transition fluide)
-        resolved.append(dict(c))
-    # Filter out clips trop courts
-    return [c for c in resolved if (c["end_s"] - c["start_s"]) >= 1.0]
-
-
-def _merge_adjacent(segments: list[dict], gap_s: float = 5.0) -> list[dict]:
-    """Fusionne les segments adjacents portant le même label scene.
-
-    Deux segments sont considérés adjacents si l'écart entre la fin du
-    premier et le début du second est <= gap_s.
-    """
-    if not segments:
-        return []
-    sorted_segs = sorted(segments, key=lambda s: s.get("start_s", 0))
-    merged = [dict(sorted_segs[0])]
-    for seg in sorted_segs[1:]:
-        last = merged[-1]
-        same_scene = seg.get("scene") == last.get("scene")
-        gap = seg.get("start_s", 0) - last.get("end_s", 0)
-        if same_scene and gap <= gap_s:
-            last["end_s"] = max(last["end_s"], seg.get("end_s", 0))
-        else:
-            merged.append(dict(seg))
-    return merged
-
-
-def _take_target_from_scene(segs_for_scene: list[dict], target: float,
-                             pos: str = "middle") -> list[dict]:
-    """Prend autant de segments que nécessaire pour cumuler `target` secondes.
-
-    Stratégie :
-        - Trier les segments par durée décroissante
-        - En prendre un par un jusqu'à atteindre target
-        - Si le dernier segment dépasse, le tronquer (selon `pos`)
-        - Retourner les clips dans l'ordre temporel d'origine
-    """
-    if not segs_for_scene:
-        return []
-    by_dur = sorted(segs_for_scene,
-                     key=lambda s: s["end_s"] - s["start_s"], reverse=True)
-    picked = []
-    cumul = 0.0
-    for seg in by_dur:
-        if cumul >= target:
-            break
-        seg_dur = seg["end_s"] - seg["start_s"]
-        remaining = target - cumul
-        if seg_dur <= remaining:
-            picked.append({"start_s": seg["start_s"],
-                            "end_s": seg["end_s"],
-                            "scene": seg["scene"]})
-            cumul += seg_dur
-        else:
-            # Tronquer ce segment selon la position
-            seg_start = seg["start_s"]
-            seg_end = seg["end_s"]
-            if pos == "start":
-                new_start = seg_start
-                new_end = seg_start + remaining
-            elif pos == "end":
-                new_end = seg_end
-                new_start = seg_end - remaining
-            else:  # middle
-                mid = (seg_start + seg_end) / 2
-                half = remaining / 2
-                new_start = max(seg_start, mid - half)
-                new_end = new_start + remaining
-            picked.append({"start_s": new_start, "end_s": new_end,
-                            "scene": seg["scene"]})
-            cumul += remaining
-    # Re-trier dans l'ordre temporel pour la narration
-    picked.sort(key=lambda s: s["start_s"])
-    return picked
-
-
 def select_best_clips(segments: list[dict],
                        max_total_duration_s: int = 320,
                        scene_durations: Optional[dict] = None,
@@ -412,6 +317,22 @@ def select_best_clips(segments: list[dict],
     if video_duration_s <= 0:
         log.warning("select_best_clips: video_duration_s inconnue")
         return []
+
+    # Guard : video trop courte (< 90s) -> mode degrade simple
+    # On ne peut pas faire un montage narratif structure sur si peu.
+    if video_duration_s < 90:
+        log.warning("Video tres courte (%.1fs) : mode degrade simple "
+                     "(pas de structure narrative).", video_duration_s)
+        # Decoupe simple : briefing au debut, climax au milieu, atterrissage fin
+        third = video_duration_s / 3
+        return [
+            {"start_s": 0.0, "end_s": min(third, 10),
+             "scene": "briefing"},
+            {"start_s": third, "end_s": min(2 * third, third + 60),
+             "scene": "chute_libre"},
+            {"start_s": 2 * third, "end_s": video_duration_s - 0.5,
+             "scene": "atterrissage"},
+        ]
 
     # ─── 2. Identifier les marqueurs cles ───
     # Priorite : telemetrie (precis ±0.1s) > Gemini (approximatif ±15s)
@@ -604,227 +525,48 @@ def select_best_clips(segments: list[dict],
                 "scene": "interaction_moniteur",
             })
 
+    # ─── 4. Clamping final : garantir 0 <= start < end <= video_duration ───
+    clamped = []
+    for c in out:
+        s = max(0.0, c["start_s"])
+        e = min(video_duration_s, c["end_s"])
+        if e - s >= 0.5:  # rejette les clips < 0.5s
+            clamped.append({"start_s": s, "end_s": e, "scene": c["scene"]})
+        else:
+            log.warning("Clip rejete (trop court ou hors video) : "
+                         "scene=%s [%.1f-%.1f]", c["scene"],
+                         c["start_s"], c["end_s"])
+    out = clamped
+
+    # ─── 5. Respect strict de max_total_duration_s ───
+    # Si la somme des clips depasse le budget, on tronque par scene
+    # selon priorite (climax > calme), en commencant par les scenes
+    # bonus (interaction, reaction) puis les paysages.
+    total_dur = sum(c["end_s"] - c["start_s"] for c in out)
+    if total_dur > max_total_duration_s:
+        excess = total_dur - max_total_duration_s
+        log.info("Depassement budget : %.1fs > %ds -> trim de %.1fs",
+                  total_dur, max_total_duration_s, excess)
+        # Priorite de trim : interaction > reaction > paysage > briefing > montee
+        trim_priority = ["interaction_moniteur", "reaction_emotion",
+                          "paysage_avion", "briefing", "vehicule_embarquement",
+                          "dans_avion", "montee_avion"]
+        for trim_scene in trim_priority:
+            if excess <= 0:
+                break
+            for c in out:
+                if c["scene"] == trim_scene and excess > 0:
+                    clip_dur = c["end_s"] - c["start_s"]
+                    can_trim = max(0, clip_dur - 2.0)  # garde au moins 2s
+                    actual = min(can_trim, excess)
+                    c["end_s"] -= actual
+                    excess -= actual
+        # Re-filter : enleve les clips qui sont devenus < 1s
+        out = [c for c in out if (c["end_s"] - c["start_s"]) >= 1.0]
+
     log.info("select_best_clips POSITIONAL : %d clips, %.1fs total",
               len(out),
               sum(c["end_s"] - c["start_s"] for c in out))
-    return out
-
-
-# ─── ANCIENNE STRATEGIE (gardee pour reference, plus utilisee) ───
-def select_best_clips_legacy(segments: list[dict],
-                       max_total_duration_s: int = 210,
-                       scene_durations: Optional[dict] = None) -> list[dict]:
-    """[DEPRECATED] Strategie multi-segment basee sur classification Gemini.
-
-    Probleme observe : melange entre fallback positionnel et segments
-    Gemini cree des sauts narratifs dans la video finale. Remplacee
-    par select_best_clips() qui garantit l'ordre temporel.
-    """
-    durations = scene_durations or SCENE_DURATIONS_CIBLE
-    segments = _merge_adjacent(segments)
-    # Order narratif (briefing -> embarquement -> dans_avion ->
-    # paysage_avion -> sortie -> chute -> sous_voile -> atterrissage ->
-    # reaction -> interaction). "montee_avion" garde sa place legacy
-    # mais la valeur de duree sert de fallback uniquement.
-    order = ["briefing", "vehicule_embarquement",
-             "dans_avion", "paysage_avion", "montee_avion",
-             "sortie_avion", "chute_libre", "sous_voile",
-             "atterrissage", "reaction_emotion", "interaction_moniteur"]
-
-    by_scene = {}
-    for seg in segments:
-        scene = seg.get("scene")
-        if scene in order:
-            by_scene.setdefault(scene, []).append(seg)
-
-    # ─── Fallback positionnel intelligent ───
-    # Probleme observe : Gemini (surtout flash-lite) classifie souvent
-    # les 100+ premieres secondes en "montee_avion" alors qu'il y a
-    # briefing + embarquement + interieur cabine + paysages.
-    # Si on detecte un GROS segment "montee_avion" au debut, on le
-    # subdivise en proportion en utilisant les durees cibles.
-    if "montee_avion" in by_scene:
-        big_montee = max(by_scene["montee_avion"],
-                          key=lambda s: s["end_s"] - s["start_s"])
-        big_dur = big_montee["end_s"] - big_montee["start_s"]
-        # Seuil : segment >= 60s au debut de la video
-        if big_dur >= 60 and big_montee["start_s"] < 30:
-            seg_start = big_montee["start_s"]
-            seg_end = big_montee["end_s"]
-            cursor = seg_start
-
-            # Briefing : tout debut (target 10s)
-            if not by_scene.get("briefing"):
-                d = durations.get("briefing", 10)
-                by_scene["briefing"] = [{
-                    "start_s": cursor, "end_s": cursor + d,
-                    "scene": "briefing",
-                }]
-            cursor += durations.get("briefing", 10)
-
-            # Embarquement (target 5s)
-            if not by_scene.get("vehicule_embarquement"):
-                d = durations.get("vehicule_embarquement", 5)
-                by_scene["vehicule_embarquement"] = [{
-                    "start_s": cursor, "end_s": cursor + d,
-                    "scene": "vehicule_embarquement",
-                }]
-            cursor += durations.get("vehicule_embarquement", 5)
-
-            # Dans l'avion : interieur cabine (target 10s)
-            if not by_scene.get("dans_avion"):
-                d = durations.get("dans_avion", 10)
-                by_scene["dans_avion"] = [{
-                    "start_s": cursor, "end_s": cursor + d,
-                    "scene": "dans_avion",
-                }]
-            cursor += durations.get("dans_avion", 10)
-
-            # Paysage avion : vue hublot (target 30s) — la VRAIE valeur
-            # ajoutee de SkyDive Pro pour ce client
-            if not by_scene.get("paysage_avion"):
-                d = durations.get("paysage_avion", 30)
-                # On reserve la fin du gros segment pour la "montee" finale
-                paysage_end = min(seg_end - 5, cursor + d)
-                if paysage_end > cursor + 5:  # au moins 5s de paysage
-                    by_scene["paysage_avion"] = [{
-                        "start_s": cursor, "end_s": paysage_end,
-                        "scene": "paysage_avion",
-                    }]
-                    cursor = paysage_end
-
-            # Montee avion : derniers 5s avant la sortie
-            montee_dur = durations.get("montee_avion", 5)
-            new_montee_start = max(cursor, seg_end - montee_dur)
-            by_scene["montee_avion"] = [{
-                "start_s": new_montee_start, "end_s": seg_end,
-                "scene": "montee_avion",
-            }]
-
-    # ─── Fallback : extraire sortie_avion depuis le debut de chute_libre ───
-    # Probleme observe : Gemini fusionne souvent "sortie_avion" avec
-    # "chute_libre" (la sortie est tres breve visuellement).
-    if not by_scene.get("sortie_avion") and by_scene.get("chute_libre"):
-        first_chute = min(by_scene["chute_libre"],
-                           key=lambda s: s["start_s"])
-        sortie_dur = durations.get("sortie_avion", 30)
-        sortie_start = max(0.0, first_chute["start_s"] - sortie_dur)
-        by_scene["sortie_avion"] = [{
-            "start_s": sortie_start,
-            "end_s": first_chute["start_s"],
-            "scene": "sortie_avion",
-        }]
-
-    # ─── Fallback : sous_voile -> chute_libre + atterrissage ───
-    # Probleme observe : Gemini-flash-lite classifie 70%+ de la video en
-    # sous_voile (de la fin de chute libre jusqu'a l'atterrissage).
-    # Si chute_libre est tres courte (<30s) mais sous_voile gigantesque
-    # (>120s), on suspecte cette confusion et on reattribue le 1er tiers
-    # de sous_voile a chute_libre.
-    sous_voile_segs = by_scene.get("sous_voile", [])
-    chute_segs = by_scene.get("chute_libre", [])
-    chute_total = sum(s["end_s"] - s["start_s"] for s in chute_segs)
-    sous_total = sum(s["end_s"] - s["start_s"] for s in sous_voile_segs)
-    if sous_total > 120 and chute_total < 40 and sous_voile_segs:
-        # Recuperer les 1ers segments sous_voile contigus pour augmenter chute
-        sv_sorted = sorted(sous_voile_segs, key=lambda s: s["start_s"])
-        recover_dur = min(60.0, sous_total / 3)
-        recovered = []
-        accumulated = 0
-        for sv in sv_sorted:
-            if accumulated >= recover_dur:
-                break
-            sv_dur = sv["end_s"] - sv["start_s"]
-            recovered.append({**sv, "scene": "chute_libre"})
-            accumulated += sv_dur
-        # Mettre a jour les listes
-        by_scene["chute_libre"] = chute_segs + recovered
-        by_scene["sous_voile"] = [s for s in sv_sorted
-                                    if s not in [r for r in recovered]]
-        log.info("Fallback sous_voile->chute_libre : %d segs, %.1fs recuperes",
-                  len(recovered), accumulated)
-
-    out = []
-    for scene in order:
-        segs = by_scene.get(scene, [])
-        if not segs:
-            continue
-        target = durations.get(scene, 8)
-        pos = SCENE_CLIP_POSITION.get(scene, "middle")
-        n_sub = SCENE_SUBDIVIDE.get(scene, 1)
-
-        # ─── Cas 1 : Subdivision avec PLUSIEURS segments distincts ───
-        # Ex: sous_voile detecte sur 9 segments differents -> on en prend 3
-        # qui sont espaces dans le temps (debut, milieu, fin) au lieu de
-        # decouper artificiellement un seul segment court.
-        if n_sub > 1 and len(segs) >= n_sub:
-            segs_sorted = sorted(segs, key=lambda s: s["start_s"])
-            sub_target = target / n_sub
-            # Picker N segments equi-repartis sur la liste
-            indices = [int(i * (len(segs_sorted) - 1) / (n_sub - 1))
-                        for i in range(n_sub)]
-            for idx in indices:
-                seg = segs_sorted[idx]
-                seg_dur = seg["end_s"] - seg["start_s"]
-                # Tronquer ce segment a sub_target depuis le debut
-                clip_dur = min(seg_dur, sub_target)
-                out.append({
-                    "start_s": seg["start_s"],
-                    "end_s": seg["start_s"] + clip_dur,
-                    "scene": scene,
-                })
-            continue
-
-        # ─── Cas 2 : Multi-segment cumule pour atteindre target ───
-        # On essaie de cumuler plusieurs segments de la meme scene si
-        # le plus long ne suffit pas a remplir target.
-        total_avail = sum(s["end_s"] - s["start_s"] for s in segs)
-        if total_avail >= target * 0.9:
-            # Assez de matiere : prendre plusieurs segments
-            picked = _take_target_from_scene(segs, target, pos)
-            out.extend(picked)
-            continue
-
-        # ─── Cas 3 : Pas assez de matiere -> extension contextuelle ───
-        # On etend le segment dans le voisinage temporel pour atteindre target.
-        # Direction d'extension selon la position narrative de la scene :
-        #   sortie_avion / atterrissage : extend en ARRIERE (avant le moment)
-        #   sous_voile : extend en AVANT
-        #   autres : extend symetrique
-        biggest = max(segs, key=lambda s: s["end_s"] - s["start_s"])
-        seg_start = biggest["start_s"]
-        seg_end = biggest["end_s"]
-        seg_dur = seg_end - seg_start
-        deficit = target - seg_dur
-
-        if deficit > 0:
-            extend_dir = {
-                "sortie_avion":   "backward",
-                "atterrissage":   "backward",
-                "sous_voile":     "forward",
-                "chute_libre":    "symmetric",
-                "reaction_emotion": "forward",
-                "interaction_moniteur": "forward",
-            }.get(scene, "symmetric")
-
-            if extend_dir == "backward":
-                seg_start = max(0.0, seg_start - deficit)
-            elif extend_dir == "forward":
-                seg_end = seg_end + deficit  # NB: pourra etre clamp par cut_clip
-            else:  # symmetric
-                seg_start = max(0.0, seg_start - deficit / 2)
-                seg_end = seg_end + deficit / 2
-
-        out.append({
-            "start_s": seg_start,
-            "end_s": seg_end,
-            "scene": scene,
-        })
-
-    # Resoudre les chevauchements MAJEURS uniquement (>= 15s)
-    # Les petits chevauchements sont en fait des transitions fluides
-    # entre scenes adjacentes (ex: fin de sortie -> debut chute_libre).
-    out = _resolve_overlaps(out, overlap_threshold=15.0)
     return out
 
 
@@ -993,7 +735,7 @@ def build_montage(video_source: str | Path,
         # peut se retrouver en fin de fichier -> certains lecteurs (Movies
         # & TV Windows, lecteurs mobiles) refusent de jouer. Ce remux
         # rapide (sans re-encodage) garantit un fichier lisible partout.
-        ffmpeg, _ = _find_ffmpeg()
+        ffmpeg, ffprobe = _find_ffmpeg()
         try:
             subprocess.run([
                 ffmpeg, "-y", "-v", "error",
@@ -1006,6 +748,58 @@ def build_montage(video_source: str | Path,
             log.warning("Re-mux faststart échoué (%s) — fallback copy",
                          (e.stderr or b"").decode("utf-8", errors="replace")[:200])
             shutil.copy(source_for_final, output_path)
+
+        # 6. VALIDATION POST-MONTAGE : ffprobe sur le fichier final
+        # On verifie : duree coherente, audio present, codec attendu.
+        # En cas de probleme, on log mais on retourne quand meme le fichier
+        # (il peut etre lisible meme si imparfait).
+        expected_dur = sum(c["end_s"] - c["start_s"] for c in best)
+        if intro_overlay:
+            expected_dur += 2.5
+        if stats_overlay:
+            expected_dur += 4.0
+        if outro_overlay:
+            expected_dur += 3.0
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "error",
+                 "-show_entries", "format=duration",
+                 "-show_streams",
+                 "-of", "json", str(output_path)],
+                capture_output=True, text=True, check=True,
+            )
+            import json as _json
+            data = _json.loads(r.stdout)
+            actual_dur = float(data["format"]["duration"])
+            streams = data.get("streams", [])
+            has_video = any(s.get("codec_type") == "video" for s in streams)
+            has_audio = any(s.get("codec_type") == "audio" for s in streams)
+            video_codec = next((s.get("codec_name") for s in streams
+                                 if s.get("codec_type") == "video"), None)
+
+            issues = []
+            if not has_video:
+                issues.append("PAS DE VIDEO")
+            if not has_audio:
+                issues.append("PAS D'AUDIO")
+            if video_codec != "h264":
+                issues.append(f"codec video={video_codec} (attendu h264)")
+            tolerance = 3.0  # s
+            if abs(actual_dur - expected_dur) > tolerance:
+                issues.append(f"duree {actual_dur:.1f}s vs attendu "
+                               f"{expected_dur:.1f}s (delta "
+                               f"{actual_dur - expected_dur:+.1f}s)")
+
+            if issues:
+                log.warning("VALIDATION POST-MONTAGE : problemes detectes — %s",
+                             "; ".join(issues))
+            else:
+                log.info("Validation OK : duree=%.1fs (attendu %.1fs), "
+                          "video=%s, audio=%s",
+                          actual_dur, expected_dur, video_codec,
+                          "OK" if has_audio else "ABSENT")
+        except Exception as e:
+            log.warning("Validation post-montage echouee : %s", e)
 
         return output_path
 

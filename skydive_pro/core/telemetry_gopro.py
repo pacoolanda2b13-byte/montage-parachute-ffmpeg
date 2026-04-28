@@ -190,8 +190,18 @@ def _decode_values(payload: bytes, type_byte: bytes,
     values_per_elem = elem_size // base_size
     fmt_string = ">" + struct_char * values_per_elem
 
+    # Plafonner repeat selon la taille reelle du payload : protection
+    # contre les GPMF corrompus qui annoncent un repeat enorme (ex:
+    # 65535) sur un payload tronque -> evite des dizaines de milliers
+    # d'iterations vides.
+    max_repeat = len(payload) // elem_size
+    safe_repeat = min(repeat, max_repeat)
+    if safe_repeat < repeat:
+        log.debug("_decode_values: repeat=%d plafonne a %d (payload trop court)",
+                   repeat, safe_repeat)
+
     out = []
-    for i in range(repeat):
+    for i in range(safe_repeat):
         chunk = payload[i * elem_size:(i + 1) * elem_size]
         if len(chunk) < elem_size:
             break
@@ -366,11 +376,22 @@ def analyze_skydive(samples: list[TelemetrySample]) -> SkydiveAnalysis:
             telemetry_disponible=False,
         )
 
-    altitudes = [s.altitude_m for s in samples if s.altitude_m is not None]
-    speeds = [s.speed_3d_mps for s in samples
-              if s.speed_3d_mps is not None]
+    # Filtrage des valeurs aberrantes :
+    # - altitudes : ignorer < -100m (bug GPS ou drift) et > 12000m (avion ligne)
+    # - vitesses : ignorer > 400 km/h = 111 m/s (au-dela du raisonnable tandem)
+    altitudes_raw = [s.altitude_m for s in samples
+                      if s.altitude_m is not None]
+    altitudes = [a for a in altitudes_raw if -100 < a < 12000]
+    if len(altitudes_raw) > len(altitudes):
+        log.info("Filtrage altitudes : %d valeurs aberrantes ecartees "
+                  "(sur %d)",
+                  len(altitudes_raw) - len(altitudes), len(altitudes_raw))
+
+    speeds_raw = [s.speed_3d_mps for s in samples
+                   if s.speed_3d_mps is not None]
+    speeds = [v for v in speeds_raw if 0 <= v < 111]  # 400 km/h max
     accels = [(s.time_s, s.accel_g) for s in samples
-              if s.accel_g is not None]
+              if s.accel_g is not None and 0 <= s.accel_g < 10]
 
     altitude_max = round(max(altitudes), 1) if altitudes else None
     altitude_min = round(min(altitudes), 1) if altitudes else None
@@ -418,21 +439,20 @@ def analyze_skydive(samples: list[TelemetrySample]) -> SkydiveAnalysis:
                         chute_end_s = s_now.time_s
                         break
 
-        # Detecter atterrissage = altitude proche du min stable
-        if altitude_min is not None:
-            threshold_low = altitude_min + 30
-            for s in reversed(samples):
-                if (s.altitude_m is not None and
-                        s.altitude_m <= threshold_low and
-                        chute_start_s is not None and
-                        s.time_s > chute_start_s + 30):
-                    atter_start_s = s.time_s
-            # Si on a trouve, on prend le 1er sample qui descend sous threshold
-            if atter_start_s is not None:
+        # Detecter atterrissage : on cherche le moment ou l'altitude
+        # commence a stagner pres du sol. On prend la mediane des
+        # altitudes filtrees pour estimer le sol (plus robuste que min).
+        if altitudes:
+            # Sol estime = mediane des 10% derniers samples
+            sorted_alts = sorted(altitudes)
+            sol_estime = sorted_alts[int(len(sorted_alts) * 0.05)]  # 5e percentile
+            threshold_low = sol_estime + 30  # 30m au-dessus du sol
+            # Trouver le 1er sample qui descend sous threshold APRES la chute
+            if chute_start_s is not None:
                 for s in samples:
                     if (s.altitude_m is not None and
+                            -100 < s.altitude_m < 12000 and  # filtre aberrant
                             s.altitude_m <= threshold_low and
-                            chute_start_s is not None and
                             s.time_s > chute_start_s + 30):
                         atter_start_s = s.time_s
                         break

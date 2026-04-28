@@ -112,6 +112,38 @@ def process_jump(video_path: str | Path,
 
     # Tmpdir unique pour tous les overlays d'un job → cleanup facile
     overlays_dir = Path(tempfile.mkdtemp(prefix=f"skydive_overlays_{job_id}_"))
+
+    # PROFILE DE LA VIDEO SOURCE (signal cle pour diag posteriori)
+    try:
+        import subprocess as _sp
+        r = _sp.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries",
+             "format=duration,bit_rate,size:stream=codec_name,codec_type,"
+             "width,height,r_frame_rate",
+             "-of", "json", str(video_path)],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            import json as _json
+            meta = _json.loads(r.stdout)
+            fmt = meta.get("format", {})
+            streams = meta.get("streams", [])
+            v_stream = next((s for s in streams
+                              if s.get("codec_type") == "video"), {})
+            has_audio = any(s.get("codec_type") == "audio" for s in streams)
+            size_mb = float(fmt.get("size", 0)) / (1024 * 1024)
+            log.info("[%s] Source : %s | %.1fs | %s %dx%d %s | "
+                      "audio=%s | %.1f MB",
+                      job_id, video_path.name,
+                      float(fmt.get("duration", 0)),
+                      v_stream.get("codec_name", "?"),
+                      v_stream.get("width", 0), v_stream.get("height", 0),
+                      v_stream.get("r_frame_rate", "?"),
+                      "OUI" if has_audio else "NON",
+                      size_mb)
+    except Exception as e:
+        log.warning("[%s] ffprobe source meta echoue : %s", job_id, e)
     log.info("[%s] Pipeline démarré — video=%s", job_id, video_path.name)
 
     try:
