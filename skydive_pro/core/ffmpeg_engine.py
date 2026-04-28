@@ -605,10 +605,31 @@ def build_montage(video_source: str | Path,
 
         # 4. Mixer la musique si fournie
         if music_path and Path(music_path).exists():
-            _mix_music(concat_out, Path(music_path), output_path,
+            mix_target = tmpdir / "mixed.mp4"
+            _mix_music(concat_out, Path(music_path), mix_target,
                        music_volume=music_volume, encoder=encoder)
+            source_for_final = mix_target
         else:
-            shutil.copy(concat_out, output_path)
+            source_for_final = concat_out
+
+        # 5. Re-mux final avec faststart explicite — l'encodeur AMD AMF
+        # n'applique pas toujours faststart correctement, le moov atom
+        # peut se retrouver en fin de fichier -> certains lecteurs (Movies
+        # & TV Windows, lecteurs mobiles) refusent de jouer. Ce remux
+        # rapide (sans re-encodage) garantit un fichier lisible partout.
+        ffmpeg, _ = _find_ffmpeg()
+        try:
+            subprocess.run([
+                ffmpeg, "-y", "-v", "error",
+                "-i", str(source_for_final),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(output_path),
+            ], check=True, capture_output=True)
+        except subprocess.CalledProcessError as e:
+            log.warning("Re-mux faststart échoué (%s) — fallback copy",
+                         (e.stderr or b"").decode("utf-8", errors="replace")[:200])
+            shutil.copy(source_for_final, output_path)
 
         return output_path
 
