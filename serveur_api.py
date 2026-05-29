@@ -13,6 +13,7 @@ Dépendances : flask (pip install flask) + FFmpeg installé sur le système.
 import os
 import uuid
 import glob
+import hmac
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -34,20 +35,38 @@ DOSSIER_SOURCES = os.environ.get("DOSSIER_SOURCES", "./sources")
 DOSSIER_SORTIE = os.environ.get("DOSSIER_SORTIE", "./output")
 # Clé API simple (optionnelle — laisser vide pour désactiver)
 API_KEY = os.environ.get("API_KEY", "")
+# Nombre maximum de montages exécutés simultanément (évite la saturation CPU).
+MAX_CONCURRENT = int(os.environ.get("MAX_CONCURRENT", "1"))
+# Nombre maximum de jobs conservés en mémoire (évite la fuite mémoire).
+MAX_JOBS = int(os.environ.get("MAX_JOBS", "200"))
 
 os.makedirs(DOSSIER_SOURCES, exist_ok=True)
 os.makedirs(DOSSIER_SORTIE, exist_ok=True)
 
-# Suivi des jobs en cours (en mémoire — suffisant pour usage solo/N8N)
+# Suivi des jobs en cours (en mémoire — suffisant pour usage solo/N8N).
+# Protégé par un verrou car manipulé depuis plusieurs threads.
 jobs = {}
+jobs_lock = threading.Lock()
+# Limite le nombre de montages FFmpeg concurrents.
+montage_semaphore = threading.Semaphore(MAX_CONCURRENT)
+
+
+def _purger_jobs():
+    """Conserve uniquement les MAX_JOBS jobs les plus récents (anti-fuite mémoire)."""
+    if len(jobs) <= MAX_JOBS:
+        return
+    # Tri par date de création ; on supprime les plus anciens.
+    anciens = sorted(jobs.items(), key=lambda kv: kv[1].get("cree_le", ""))
+    for job_id, _ in anciens[:len(jobs) - MAX_JOBS]:
+        jobs.pop(job_id, None)
 
 
 def verif_api_key():
-    """Vérifie la clé API si elle est configurée."""
+    """Vérifie la clé API si elle est configurée (comparaison en temps constant)."""
     if not API_KEY:
         return None
-    key = request.headers.get("X-API-Key") or request.args.get("api_key")
-    if key != API_KEY:
+    key = request.headers.get("X-API-Key") or request.args.get("api_key") or ""
+    if not hmac.compare_digest(key, API_KEY):
         return jsonify({"erreur": "Clé API invalide"}), 401
     return None
 
@@ -139,15 +158,23 @@ def creer_montage_route():
     if not fichiers_raw:
         return jsonify({"erreur": "Le champ 'fichiers' est obligatoire (liste non vide)."}), 400
 
-    # Résolution des chemins
+    # Résolution des chemins — strictement confinée à DOSSIER_SOURCES.
+    # On rejette les chemins absolus et les traversées (../) pour empêcher
+    # la lecture de fichiers arbitraires sur le serveur.
+    base_sources = os.path.realpath(DOSSIER_SOURCES)
     fichiers_video = []
     for f in fichiers_raw:
-        if os.path.isabs(f):
-            chemin = f
-        else:
-            chemin = os.path.join(DOSSIER_SOURCES, f)
-        if not os.path.exists(chemin):
-            return jsonify({"erreur": f"Fichier introuvable : {chemin}"}), 404
+        nom = Path(str(f)).name  # ne garde que le nom de fichier
+        if not nom or nom != str(f):
+            return jsonify({
+                "erreur": f"Nom de fichier invalide : '{f}'. "
+                          "Seuls les fichiers du dossier sources sont autorisés."
+            }), 400
+        chemin = os.path.realpath(os.path.join(base_sources, nom))
+        if os.path.commonpath([base_sources, chemin]) != base_sources:
+            return jsonify({"erreur": f"Chemin non autorisé : '{f}'"}), 400
+        if not os.path.isfile(chemin):
+            return jsonify({"erreur": f"Fichier introuvable : {nom}"}), 404
         fichiers_video.append(chemin)
 
     # Nom de sortie avec date automatique
@@ -162,17 +189,23 @@ def creer_montage_route():
     attendre = data.get("attendre", False)
 
     job_id = str(uuid.uuid4())
-    jobs[job_id] = {"statut": "en_cours", "fichier": None, "erreur": None,
-                    "cree_le": date_str}
+    with jobs_lock:
+        jobs[job_id] = {"statut": "en_cours", "fichier": None, "erreur": None,
+                        "cree_le": datetime.now().strftime("%Y%m%d_%H%M%S_%f")}
+        _purger_jobs()
 
     def executer():
-        try:
-            chemin_final = creer_montage(fichiers_video, nom_sortie, transitions, cfg)
-            jobs[job_id]["statut"] = "termine"
-            jobs[job_id]["fichier"] = chemin_final
-        except Exception as e:
-            jobs[job_id]["statut"] = "erreur"
-            jobs[job_id]["erreur"] = str(e)
+        # Le sémaphore borne le nombre de montages FFmpeg simultanés.
+        with montage_semaphore:
+            try:
+                chemin_final = creer_montage(fichiers_video, nom_sortie, transitions, cfg)
+                with jobs_lock:
+                    jobs[job_id]["statut"] = "termine"
+                    jobs[job_id]["fichier"] = chemin_final
+            except Exception as e:
+                with jobs_lock:
+                    jobs[job_id]["statut"] = "erreur"
+                    jobs[job_id]["erreur"] = str(e)
 
     if attendre:
         executer()

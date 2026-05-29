@@ -13,34 +13,55 @@ from pathlib import Path
 
 
 # ─────────────────────────────────────────────
-#  DETECTION AUTOMATIQUE DE FFMPEG
+#  DETECTION AUTOMATIQUE DE FFMPEG (Windows / Linux / macOS)
 # ─────────────────────────────────────────────
 def _trouver_ffmpeg():
-    """Cherche ffmpeg dans PATH puis dans les emplacements WinGet/courants."""
+    """
+    Cherche ffmpeg/ffprobe dans le PATH (toutes plateformes) puis dans les
+    emplacements courants spécifiques à l'OS.
+    """
     import shutil as _shutil
-    if _shutil.which("ffmpeg"):
-        return "ffmpeg", "ffprobe"
-    # Emplacements typiques Windows
-    chemins = [
-        r"C:\ffmpeg\bin",
-        r"C:\Program Files\ffmpeg\bin",
-        r"C:\Program Files (x86)\ffmpeg\bin",
-    ]
-    # WinGet
-    winget_base = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages")
-    if os.path.isdir(winget_base):
-        for d in os.listdir(winget_base):
-            if "FFmpeg" in d or "ffmpeg" in d:
-                candidate = os.path.join(winget_base, d)
-                for root, dirs, files in os.walk(candidate):
-                    if "ffmpeg.exe" in files:
-                        chemins.insert(0, root)
-                        break
-    for rep in chemins:
-        ff = os.path.join(rep, "ffmpeg.exe")
-        fp = os.path.join(rep, "ffprobe.exe")
-        if os.path.isfile(ff):
-            return ff, fp
+    import platform as _platform
+
+    # 1) PATH — fonctionne sur Linux, macOS et Windows
+    ff = _shutil.which("ffmpeg")
+    fp = _shutil.which("ffprobe")
+    if ff and fp:
+        return ff, fp
+
+    systeme = _platform.system()
+
+    if systeme == "Windows":
+        chemins = [
+            r"C:\ffmpeg\bin",
+            r"C:\Program Files\ffmpeg\bin",
+            r"C:\Program Files (x86)\ffmpeg\bin",
+        ]
+        # WinGet
+        winget_base = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Packages")
+        if os.path.isdir(winget_base):
+            for d in os.listdir(winget_base):
+                if "ffmpeg" in d.lower():
+                    candidate = os.path.join(winget_base, d)
+                    for root, _dirs, files in os.walk(candidate):
+                        if "ffmpeg.exe" in files:
+                            chemins.insert(0, root)
+                            break
+        for rep in chemins:
+            cand_ff = os.path.join(rep, "ffmpeg.exe")
+            cand_fp = os.path.join(rep, "ffprobe.exe")
+            if os.path.isfile(cand_ff):
+                return cand_ff, cand_fp
+    else:
+        # Linux / macOS — chemins d'installation courants (apt, brew, etc.)
+        chemins = ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin", "/snap/bin"]
+        for rep in chemins:
+            cand_ff = os.path.join(rep, "ffmpeg")
+            cand_fp = os.path.join(rep, "ffprobe")
+            if os.path.isfile(cand_ff):
+                return cand_ff, cand_fp
+
+    # Dernier recours : laisser le système résoudre via PATH au moment de l'appel
     return "ffmpeg", "ffprobe"
 
 
@@ -111,9 +132,27 @@ def verifier_ffmpeg():
     print(f"[OK] {version_line}")
 
 
+def clip_a_audio(chemin: str) -> bool:
+    """
+    Retourne True si le fichier contient au moins une piste audio.
+    Indispensable car les clips GoPro/drone sont souvent muets, ce qui
+    casserait le mapping audio du filtergraph xfade/acrossfade.
+    """
+    cmd = [
+        FFPROBE_BIN, "-v", "error",
+        "-select_streams", "a",
+        "-show_entries", "stream=codec_type",
+        "-of", "csv=p=0", chemin
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    return result.returncode == 0 and "audio" in result.stdout
+
+
 def preparer_clip(entree: str, index: int, dossier_tmp: str, cfg: dict) -> str:
     """
     Normalise un clip : résolution, FPS, durée.
+    Garantit la présence d'une piste audio (silence injecté si la source est
+    muette) afin que tous les clips soient enchaînables uniformément.
     Retourne le chemin du clip normalisé.
     """
     sortie = os.path.join(dossier_tmp, f"clip_{index:03d}.mp4")
@@ -127,11 +166,19 @@ def preparer_clip(entree: str, index: int, dossier_tmp: str, cfg: dict) -> str:
                   f"fps={fps}"]
     vf = ",".join(vf_filters)
 
+    a_de_laudio = clip_a_audio(entree)
+
     cmd = [FFMPEG_BIN, "-y", "-i", entree]
+    if not a_de_laudio:
+        # Source muette : on ajoute une piste de silence pour homogénéiser.
+        cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"]
     if duree:
         cmd += ["-t", str(duree)]
+    cmd += ["-vf", vf]
+    if not a_de_laudio:
+        # Mapper explicitement la vidéo source + le silence généré.
+        cmd += ["-map", "0:v", "-map", "1:a", "-shortest"]
     cmd += [
-        "-vf", vf,
         "-c:v", "libx264",       # toujours CPU pour la préparation (rapide)
         "-preset", "ultrafast",
         "-crf", "18",
@@ -140,7 +187,8 @@ def preparer_clip(entree: str, index: int, dossier_tmp: str, cfg: dict) -> str:
         "-ar", "44100",
         sortie
     ]
-    print(f"  Préparation clip {index+1} : {os.path.basename(entree)}")
+    etiquette = "" if a_de_laudio else " [silence ajouté]"
+    print(f"  Préparation clip {index+1} : {os.path.basename(entree)}{etiquette}")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"Erreur préparation clip {entree}:\n{result.stderr}")
