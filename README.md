@@ -33,21 +33,37 @@ cp .env.example .env   # puis ajuster les valeurs
 
 ## Utilisation
 
-### En ligne de commande
+### Le plus simple : `monter.py` (recommandé)
+
+Un seul script, un dossier de vidéos en entrée, un montage en sortie. Les
+transitions sont choisies **automatiquement** selon le style, et les fichiers
+sont triés dans le bon ordre (`clip1`, `clip2`, … `clip10`).
 
 ```bash
-# Montage simple
-python montage_parachute_ffmpeg.py clip1.mp4 clip2.mp4 clip3.mp4 -o sortie.mp4
+# Monte toutes les vidéos du dossier ./sources (style dynamique par défaut)
+python monter.py
 
-# Avec transitions choisies
-python montage_parachute_ffmpeg.py a.mp4 b.mp4 -t fade circleopen --duree-clip 5
-
-# Lister les transitions disponibles
-python montage_parachute_ffmpeg.py --list-transitions
+# Préciser un dossier, un style et un nom de sortie
+python monter.py mes_videos/ --style dynamique -o saut_du_jour.mp4
+python monter.py mes_videos/ --style cinematique
 ```
+
+Styles disponibles :
+- `dynamique` : transitions variées et rythmées (fade, cercle, balayage, zoom…) ;
+- `cinematique` : uniquement des fondus doux.
 
 > Les clips **muets** (GoPro/drone) sont gérés automatiquement : une piste audio
 > silencieuse est injectée pour homogénéiser le montage.
+
+### Contrôle fin : `montage_parachute_ffmpeg.py`
+
+Pour choisir manuellement chaque transition :
+
+```bash
+python montage_parachute_ffmpeg.py clip1.mp4 clip2.mp4 clip3.mp4 -o sortie.mp4
+python montage_parachute_ffmpeg.py a.mp4 b.mp4 -t fade circleopen --duree-clip 5
+python montage_parachute_ffmpeg.py --list-transitions
+```
 
 ### Via l'API
 

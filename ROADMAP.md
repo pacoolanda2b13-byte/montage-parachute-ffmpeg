@@ -23,10 +23,21 @@ Le projet a **3 couches** :
 
 ---
 
+> **Vidéos sources** : 6 clips réels (`clip1.mp4` … `clip6.mp4`) sont sur le
+> Google Drive de l'utilisateur, dossier **"Parachute Sources"**. Le connecteur
+> Drive ne permet pas de les rapatrier ici (téléchargement base64 trop volumineux
+> pour le contexte). Test grandeur nature à faire sur la machine de l'utilisateur
+> (`python monter.py sources/`) ou via N8N branché sur Drive.
+
 ## Phase 0 — Fondations & validation
-- [ ] Ajouter des vidéos d'exemple (`samples/`) pour tester le montage de bout en bout.
-- [ ] Rendre le moteur **Linux-compatible** (la détection FFmpeg actuelle est 100 % Windows).
+- [x] Rendre le moteur **Linux-compatible** (détection FFmpeg multi-OS).
+- [x] Valider le montage de bout en bout (clips de test, FFmpeg réel).
 - [ ] Décider l'OS cible du serveur (Linux recommandé).
+
+## Phase 0.5 — Simplification (tout-en-un Python)
+- [x] `monter.py` : un dossier en entrée → un montage en sortie, transitions auto.
+- [x] Tri naturel des fichiers (clip2 avant clip10).
+- [x] Styles prédéfinis (`dynamique`, `cinematique`).
 
 ## Phase 1 — Bugs bloquants
 - [ ] **Intégration N8N ↔ API** : N8N télécharge les vidéos mais ne les transmet jamais à l'API
