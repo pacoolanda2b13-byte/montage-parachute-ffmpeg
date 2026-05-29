@@ -3,6 +3,10 @@
 Feuille de route du projet, par phases. Chaque phase est livrable indépendamment.
 Objectif prioritaire défini avec l'utilisateur : **fiabiliser l'orchestration**.
 
+> 🎯 **Cap produit** : ce projet vise un **SaaS de montage pour écoles de
+> parachutisme** (phase prototype perso aujourd'hui). Vision et étapes détaillées
+> dans **[`VISION_SAAS.md`](./VISION_SAAS.md)**.
+
 ---
 
 ## Contexte technique
