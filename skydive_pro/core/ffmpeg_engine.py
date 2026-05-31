@@ -18,6 +18,7 @@ Usage :
 
 from __future__ import annotations
 
+import json as _json
 import os
 import shutil
 import subprocess
@@ -28,6 +29,74 @@ from typing import Optional
 from core.logger import get_logger
 
 log = get_logger(__name__)
+
+
+# ══════════════════════════════════════════════════════════════
+#  Validation post-montage
+# ══════════════════════════════════════════════════════════════
+def validate_montage(output_path: str | Path,
+                     expected_dur: Optional[float] = None,
+                     duration_tolerance_s: float = 3.0) -> dict:
+    """Vérifie l'intégrité d'un montage produit (ffprobe).
+
+    Contrôle : présence vidéo + audio, codec h264, durée cohérente avec
+    la durée attendue. Retourne un rapport structuré exploitable par le
+    pipeline pour décider du statut (succes / partiel) — au lieu de
+    "soft fail" silencieux qui faisait croire à un succès (cf postmortem
+    bug #6).
+
+    Returns:
+        dict {ok: bool, issues: list[str], duration_s, has_video,
+              has_audio, video_codec}
+    """
+    _, ffprobe = _find_ffmpeg()
+    rapport = {"ok": False, "issues": [], "duration_s": None,
+               "has_video": False, "has_audio": False, "video_codec": None}
+
+    output_path = Path(output_path)
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        rapport["issues"].append("FICHIER ABSENT OU VIDE")
+        return rapport
+
+    try:
+        r = subprocess.run(
+            [ffprobe, "-v", "error",
+             "-show_entries", "format=duration",
+             "-show_streams", "-of", "json", str(output_path)],
+            capture_output=True, text=True, check=True,
+        )
+        data = _json.loads(r.stdout)
+    except Exception as e:
+        rapport["issues"].append(f"ffprobe illisible : {e}")
+        return rapport
+
+    streams = data.get("streams", [])
+    rapport["has_video"] = any(s.get("codec_type") == "video" for s in streams)
+    rapport["has_audio"] = any(s.get("codec_type") == "audio" for s in streams)
+    rapport["video_codec"] = next(
+        (s.get("codec_name") for s in streams
+         if s.get("codec_type") == "video"), None)
+    try:
+        rapport["duration_s"] = float(data["format"]["duration"])
+    except (KeyError, ValueError, TypeError):
+        rapport["duration_s"] = None
+
+    if not rapport["has_video"]:
+        rapport["issues"].append("PAS DE VIDEO")
+    if not rapport["has_audio"]:
+        rapport["issues"].append("PAS D'AUDIO")
+    if rapport["video_codec"] != "h264":
+        rapport["issues"].append(
+            f"codec video={rapport['video_codec']} (attendu h264)")
+    if expected_dur is not None and rapport["duration_s"] is not None:
+        delta = rapport["duration_s"] - expected_dur
+        if abs(delta) > duration_tolerance_s:
+            rapport["issues"].append(
+                f"duree {rapport['duration_s']:.1f}s vs attendu "
+                f"{expected_dur:.1f}s (delta {delta:+.1f}s)")
+
+    rapport["ok"] = not rapport["issues"]
+    return rapport
 
 
 # ══════════════════════════════════════════════════════════════
@@ -749,10 +818,10 @@ def build_montage(video_source: str | Path,
                          (e.stderr or b"").decode("utf-8", errors="replace")[:200])
             shutil.copy(source_for_final, output_path)
 
-        # 6. VALIDATION POST-MONTAGE : ffprobe sur le fichier final
-        # On verifie : duree coherente, audio present, codec attendu.
-        # En cas de probleme, on log mais on retourne quand meme le fichier
-        # (il peut etre lisible meme si imparfait).
+        # 6. VALIDATION POST-MONTAGE : ffprobe sur le fichier final.
+        # Le rapport est écrit dans un fichier .validation.json à côté du
+        # montage pour que le pipeline puisse décider du statut (succes /
+        # partiel) au lieu d'un "soft fail" silencieux (cf postmortem #6).
         expected_dur = sum(c["end_s"] - c["start_s"] for c in best)
         if intro_overlay:
             expected_dur += 2.5
@@ -760,46 +829,22 @@ def build_montage(video_source: str | Path,
             expected_dur += 4.0
         if outro_overlay:
             expected_dur += 3.0
+
+        rapport = validate_montage(output_path, expected_dur=expected_dur)
+        if rapport["ok"]:
+            log.info("Validation OK : duree=%.1fs (attendu %.1fs), "
+                      "video=%s, audio=%s",
+                      rapport["duration_s"] or -1, expected_dur,
+                      rapport["video_codec"],
+                      "OK" if rapport["has_audio"] else "ABSENT")
+        else:
+            log.warning("VALIDATION POST-MONTAGE : problemes detectes — %s",
+                         "; ".join(rapport["issues"]))
         try:
-            r = subprocess.run(
-                [ffprobe, "-v", "error",
-                 "-show_entries", "format=duration",
-                 "-show_streams",
-                 "-of", "json", str(output_path)],
-                capture_output=True, text=True, check=True,
-            )
-            import json as _json
-            data = _json.loads(r.stdout)
-            actual_dur = float(data["format"]["duration"])
-            streams = data.get("streams", [])
-            has_video = any(s.get("codec_type") == "video" for s in streams)
-            has_audio = any(s.get("codec_type") == "audio" for s in streams)
-            video_codec = next((s.get("codec_name") for s in streams
-                                 if s.get("codec_type") == "video"), None)
-
-            issues = []
-            if not has_video:
-                issues.append("PAS DE VIDEO")
-            if not has_audio:
-                issues.append("PAS D'AUDIO")
-            if video_codec != "h264":
-                issues.append(f"codec video={video_codec} (attendu h264)")
-            tolerance = 3.0  # s
-            if abs(actual_dur - expected_dur) > tolerance:
-                issues.append(f"duree {actual_dur:.1f}s vs attendu "
-                               f"{expected_dur:.1f}s (delta "
-                               f"{actual_dur - expected_dur:+.1f}s)")
-
-            if issues:
-                log.warning("VALIDATION POST-MONTAGE : problemes detectes — %s",
-                             "; ".join(issues))
-            else:
-                log.info("Validation OK : duree=%.1fs (attendu %.1fs), "
-                          "video=%s, audio=%s",
-                          actual_dur, expected_dur, video_codec,
-                          "OK" if has_audio else "ABSENT")
-        except Exception as e:
-            log.warning("Validation post-montage echouee : %s", e)
+            (output_path.with_suffix(output_path.suffix + ".validation.json")
+             ).write_text(_json.dumps(rapport, indent=2), encoding="utf-8")
+        except OSError as e:
+            log.warning("Ecriture rapport validation echouee : %s", e)
 
         return output_path
 

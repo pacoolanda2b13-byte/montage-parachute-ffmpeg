@@ -251,9 +251,36 @@ def process_jump(video_path: str | Path,
                 result.fichier_montage = str(output_file)
                 result.taille_montage_mb = round(
                     output_file.stat().st_size / (1024 * 1024), 2)
-                result.statut = "succes"
-            result.ajouter_etape("montage", _timer() - t, True,
-                                  f"fichier={output_file.name}")
+                # Lire le rapport de validation post-montage : un montage
+                # produit mais cassé (pas d'audio, durée aberrante) doit
+                # être marqué "partiel", pas "succes" (cf postmortem #6).
+                rapport_path = output_file.with_suffix(
+                    output_file.suffix + ".validation.json")
+                validation_ok = True
+                detail_validation = ""
+                if rapport_path.exists():
+                    try:
+                        import json as _json
+                        rapport = _json.loads(rapport_path.read_text("utf-8"))
+                        validation_ok = rapport.get("ok", True)
+                        if not validation_ok:
+                            detail_validation = (
+                                " | validation: "
+                                + "; ".join(rapport.get("issues", [])))
+                            result.erreurs.append(
+                                "Montage dégradé : "
+                                + "; ".join(rapport.get("issues", [])))
+                    except (ValueError, OSError) as e:
+                        log.warning("[%s] Lecture rapport validation: %s",
+                                     job_id, e)
+                result.statut = "succes" if validation_ok else "partiel"
+                result.ajouter_etape(
+                    "montage", _timer() - t, validation_ok,
+                    f"fichier={output_file.name}{detail_validation}")
+            else:
+                result.ajouter_etape("montage", _timer() - t, False,
+                                      "fichier de sortie absent")
+                result.erreurs.append("Montage : fichier de sortie absent")
         except Exception as e:
             log.error("[%s] Montage: %s\n%s", job_id, e, traceback.format_exc())
             result.ajouter_etape("montage", _timer() - t, False, str(e))
