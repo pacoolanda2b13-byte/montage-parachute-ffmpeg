@@ -1,0 +1,65 @@
+# ====================================================================
+#  SkyDive Pro — Dépendances Python
+#  Installation : pip install -r requirements.txt
+#  Python 3.11+ requis
+# ====================================================================
+
+# ──── Core Framework ────
+flask>=3.0.0
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+pydantic>=2.6.0
+
+# ──── Vidéo & Montage ────
+moviepy==1.0.3
+ffmpeg-python>=0.2.0
+scenedetect[opencv]>=0.6.3
+
+# ──── Audio ────
+librosa>=0.10.1
+soundfile>=0.12.1
+numpy>=1.26.0
+scipy>=1.12.0
+
+# ──── Télémétrie GoPro (GPMF) ────
+gopro-overlay>=0.124.0
+# Alternative plus légère si gopro-overlay pose souci :
+# ffprobe extraction manuelle + parsing JSON
+
+# ──── Vision / Détection scènes ────
+opencv-python>=4.9.0
+Pillow>=10.2.0
+
+# ──── IA : Détection visages & émotions (local, gratuit) ────
+deepface>=0.0.90
+tf-keras>=2.15.0
+
+# ──── IA : Pose & gestes (local, gratuit) ────
+mediapipe>=0.10.9
+
+# ──── IA : APIs cloud ────
+# Gemini (gratuit, 1500 req/jour)
+google-generativeai>=0.4.0
+# Claude (optionnel, fallback premium)
+anthropic>=0.21.0
+
+# ──── Livraison ────
+google-api-python-client>=2.120.0   # Drive + Gmail
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+qrcode[pil]>=7.4.2
+# SMS optionnel
+twilio>=9.0.0
+
+# ──── Base de données ────
+sqlalchemy>=2.0.27
+alembic>=1.13.1                      # migrations
+
+# ──── Logs & monitoring ────
+loguru>=0.7.2
+
+# ──── Dev & tests ────
+pytest>=8.0.0
+pytest-cov>=4.1.0
+black>=24.2.0
+ruff>=0.3.0

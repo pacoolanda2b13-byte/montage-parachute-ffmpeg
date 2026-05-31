@@ -1,0 +1,79 @@
+# ─── Secrets / config sensible ────────────────────
+.env
+config/config.yaml
+config/google_credentials.json
+config/*_token.json
+*.pem
+*.key
+
+# ─── Python ───────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ─── Environnements virtuels ──────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ─── Tests & coverage ─────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.ruff_cache/
+
+# ─── Fichiers métier (lourds, ne pas pousser) ─────
+sources/*.mp4
+sources/*.MP4
+sources/*.mov
+sources/*.MOV
+output/*.mp4
+output/*.MP4
+logs/*.log
+
+# Mais on garde la structure des dossiers
+!sources/.gitkeep
+!output/.gitkeep
+!logs/.gitkeep
+
+# ─── Assets volumineux ────────────────────────────
+assets/music/*.mp3
+assets/music/*.wav
+!assets/music/.gitkeep
+
+# ─── Base de données ──────────────────────────────
+db/*.db
+db/*.sqlite
+db/*.sqlite3
+
+# ─── IDE ──────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── N8N ──────────────────────────────────────────
+.n8n/

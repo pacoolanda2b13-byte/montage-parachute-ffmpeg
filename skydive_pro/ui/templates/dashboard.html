@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkyDive Pro — Dashboard</title>
+    <style>
+        :root {
+            --primary: {{ branding.couleur_primaire or '#FF6B00' }};
+            --primary-light: #FF9500;
+            --secondary: {{ branding.couleur_secondaire or '#1A1A2E' }};
+            --bg: #0B0B13;
+            --bg-card: #16162B;
+            --bg-card-hover: #1E1E38;
+            --bg-sidebar: #0A0A12;
+            --text: #F5F5F7;
+            --text-dim: #8B8B9D;
+            --text-faint: #5A5A70;
+            --border: #242438;
+            --success: #00D97E;
+            --warning: #FFB547;
+            --danger: #FF4757;
+            --info: #3B82F6;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+        }
+
+        /* ===== Sidebar ===== */
+        aside {
+            width: 240px;
+            background: var(--bg-sidebar);
+            border-right: 1px solid var(--border);
+            padding: 24px 16px;
+            position: sticky; top: 0; height: 100vh;
+            display: flex; flex-direction: column;
+        }
+        .brand {
+            display: flex; align-items: center; gap: 12px;
+            padding: 8px 12px 24px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 20px;
+        }
+        .brand-icon {
+            width: 40px; height: 40px;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+            border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 22px;
+            box-shadow: 0 6px 20px rgba(255, 107, 0, 0.35);
+        }
+        .brand-text { font-size: 17px; font-weight: 700; letter-spacing: -0.3px; }
+        .brand-text small { display: block; font-size: 11px; color: var(--text-dim); font-weight: 400; letter-spacing: 0; }
+
+        nav { flex: 1; }
+        .nav-label {
+            font-size: 11px; color: var(--text-faint); text-transform: uppercase;
+            letter-spacing: 1.2px; padding: 10px 12px 6px;
+        }
+        .nav-item {
+            display: flex; align-items: center; gap: 12px;
+            padding: 10px 12px; border-radius: 8px;
+            color: var(--text-dim); font-size: 14px;
+            cursor: pointer; transition: all 0.15s;
+            text-decoration: none;
+        }
+        .nav-item:hover { background: var(--bg-card); color: var(--text); }
+        .nav-item.active {
+            background: linear-gradient(90deg, rgba(255, 107, 0, 0.15), transparent);
+            color: var(--primary);
+            border-left: 2px solid var(--primary);
+            padding-left: 10px;
+        }
+        .nav-item .icon { font-size: 16px; width: 20px; text-align: center; }
+        .nav-item .badge {
+            margin-left: auto; background: var(--primary); color: white;
+            font-size: 11px; padding: 2px 7px; border-radius: 10px; font-weight: 600;
+        }
+
+        .sidebar-footer {
+            padding: 14px 12px; border-top: 1px solid var(--border);
+            display: flex; align-items: center; gap: 10px;
+            font-size: 13px; color: var(--text-dim);
+        }
+        .status-dot {
+            width: 8px; height: 8px; background: var(--success); border-radius: 50%;
+            box-shadow: 0 0 10px var(--success);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* ===== Main ===== */
+        main { flex: 1; padding: 32px 40px; overflow-x: hidden; }
+        .page-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 30px;
+        }
+        .page-title h1 {
+            font-size: 26px; font-weight: 700; letter-spacing: -0.5px;
+        }
+        .page-title p { font-size: 14px; color: var(--text-dim); margin-top: 4px; }
+
+        .btn {
+            padding: 11px 20px; border-radius: 10px; border: none;
+            font-size: 14px; font-weight: 600; cursor: pointer;
+            display: inline-flex; align-items: center; gap: 8px;
+            transition: all 0.15s;
+            font-family: inherit;
+        }
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary), var(--primary-light));
+            color: white;
+            box-shadow: 0 6px 18px rgba(255, 107, 0, 0.35);
+        }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 10px 24px rgba(255, 107, 0, 0.45); }
+        .btn-secondary {
+            background: var(--bg-card); color: var(--text); border: 1px solid var(--border);
+        }
+        .btn-secondary:hover { background: var(--bg-card-hover); }
+
+        /* ===== Banner démo ===== */
+        .demo-banner {
+            background: linear-gradient(90deg, rgba(255, 107, 0, 0.12), rgba(255, 149, 0, 0.04));
+            border: 1px solid rgba(255, 107, 0, 0.3); border-radius: 12px;
+            padding: 14px 18px; margin-bottom: 28px;
+            display: flex; align-items: center; gap: 14px;
+            font-size: 13px;
+        }
+        .demo-banner strong { color: var(--primary); }
+
+        /* ===== Stats ===== */
+        .stats {
+            display: grid; grid-template-columns: repeat(4, 1fr);
+            gap: 16px; margin-bottom: 32px;
+        }
+        .stat-card {
+            background: var(--bg-card); padding: 22px; border-radius: 14px;
+            border: 1px solid var(--border);
+            transition: all 0.2s;
+            position: relative; overflow: hidden;
+        }
+        .stat-card::before {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+            background: linear-gradient(90deg, var(--primary), transparent);
+            opacity: 0; transition: opacity 0.2s;
+        }
+        .stat-card:hover { border-color: rgba(255, 107, 0, 0.4); transform: translateY(-2px); }
+        .stat-card:hover::before { opacity: 1; }
+        .stat-label {
+            font-size: 12px; color: var(--text-dim); text-transform: uppercase;
+            letter-spacing: 1px; font-weight: 600;
+        }
+        .stat-value {
+            font-size: 32px; font-weight: 700; margin-top: 10px; letter-spacing: -1px;
+            background: linear-gradient(135deg, var(--primary), var(--primary-light));
+            -webkit-background-clip: text; background-clip: text; color: transparent;
+        }
+        .stat-hint {
+            font-size: 12px; color: var(--text-dim); margin-top: 8px;
+            display: flex; align-items: center; gap: 4px;
+        }
+        .stat-hint .up { color: var(--success); }
+
+        /* ===== Sections ===== */
+        .section { margin-bottom: 32px; }
+        .section-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 16px;
+        }
+        .section-title {
+            font-size: 16px; font-weight: 600;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .section-title::before {
+            content: ''; width: 3px; height: 16px;
+            background: var(--primary); border-radius: 2px;
+        }
+        .section-action { font-size: 13px; color: var(--primary); cursor: pointer; }
+
+        /* ===== Jobs ===== */
+        .jobs { display: grid; gap: 10px; }
+        .job {
+            background: var(--bg-card); padding: 18px 22px; border-radius: 12px;
+            border: 1px solid var(--border);
+            display: grid; grid-template-columns: auto 1fr auto auto; gap: 20px;
+            align-items: center; transition: all 0.2s;
+        }
+        .job:hover { border-color: rgba(255, 107, 0, 0.3); background: var(--bg-card-hover); }
+        .job-avatar {
+            width: 42px; height: 42px; border-radius: 50%;
+            background: linear-gradient(135deg, var(--primary), var(--primary-light));
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700; color: white; font-size: 15px;
+        }
+        .job-info .name { font-weight: 600; font-size: 14px; }
+        .job-info .meta { font-size: 13px; color: var(--text-dim); margin-top: 3px; }
+        .job-stats { display: flex; gap: 24px; font-size: 13px; }
+        .job-stat { text-align: right; }
+        .job-stat-label {
+            color: var(--text-faint); font-size: 10px; text-transform: uppercase;
+            letter-spacing: 0.5px; font-weight: 600;
+        }
+        .job-stat-value { font-weight: 600; margin-top: 2px; }
+        .job-status {
+            padding: 6px 13px; border-radius: 50px; font-size: 11px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.6px;
+        }
+        .status-termine { background: rgba(0, 217, 126, 0.15); color: var(--success); }
+        .status-encours { background: rgba(255, 181, 71, 0.15); color: var(--warning); }
+        .progress-bar {
+            height: 3px; background: var(--border); border-radius: 2px; overflow: hidden;
+            margin-top: 8px; width: 140px;
+        }
+        .progress-fill {
+            height: 100%; background: linear-gradient(90deg, var(--primary), var(--primary-light));
+            border-radius: 2px; transition: width 0.5s;
+        }
+
+        /* ===== Scenes ===== */
+        .scenes-grid {
+            display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px;
+        }
+        .scene-card {
+            background: var(--bg-card); padding: 14px 16px; border-radius: 10px;
+            border: 1px solid var(--border);
+            display: flex; align-items: center; gap: 12px;
+            font-size: 13px;
+        }
+        .scene-card:hover { border-color: rgba(255, 107, 0, 0.3); }
+        .scene-icon { font-size: 20px; }
+        .scene-name { font-weight: 500; text-transform: capitalize; }
+
+        /* ===== Modal ===== */
+        .modal-overlay {
+            display: none; position: fixed; inset: 0;
+            background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(6px);
+            align-items: center; justify-content: center; z-index: 100;
+            padding: 20px;
+        }
+        .modal-overlay.active { display: flex; }
+        .modal {
+            background: var(--bg-card); border: 1px solid var(--border);
+            border-radius: 18px; padding: 32px;
+            max-width: 520px; width: 100%;
+            max-height: 90vh; overflow-y: auto;
+            animation: slideUp 0.25s ease-out;
+        }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(20px) scale(0.98); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .modal-header {
+            display: flex; align-items: center; justify-content: space-between;
+            margin-bottom: 24px;
+        }
+        .modal-title { font-size: 20px; font-weight: 700; }
+        .modal-close {
+            background: transparent; border: none; color: var(--text-dim);
+            font-size: 26px; cursor: pointer; line-height: 1;
+            width: 32px; height: 32px; border-radius: 8px;
+        }
+        .modal-close:hover { background: var(--bg-card-hover); color: var(--text); }
+
+        .form-group { margin-bottom: 18px; }
+        .form-label {
+            display: block; font-size: 13px; font-weight: 600;
+            margin-bottom: 7px; color: var(--text);
+        }
+        .form-label .required { color: var(--danger); }
+        .form-input, .form-select {
+            width: 100%; padding: 12px 14px;
+            background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+            color: var(--text); font-size: 14px; font-family: inherit;
+            transition: border-color 0.15s;
+        }
+        .form-input:focus, .form-select:focus {
+            outline: none; border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.15);
+        }
+
+        .file-drop {
+            border: 2px dashed var(--border); border-radius: 12px;
+            padding: 32px 20px; text-align: center;
+            cursor: pointer; transition: all 0.15s;
+            background: var(--bg);
+        }
+        .file-drop:hover, .file-drop.drag-over {
+            border-color: var(--primary); background: rgba(255, 107, 0, 0.04);
+        }
+        .file-drop-icon { font-size: 32px; margin-bottom: 8px; }
+        .file-drop-title { font-weight: 600; font-size: 14px; }
+        .file-drop-hint { font-size: 12px; color: var(--text-dim); margin-top: 4px; }
+        .file-drop.has-file {
+            border-style: solid; border-color: var(--success);
+            background: rgba(0, 217, 126, 0.05);
+        }
+        input[type="file"] { display: none; }
+
+        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+        .modal-actions {
+            display: flex; gap: 10px; justify-content: flex-end;
+            margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border);
+        }
+
+        .tabs {
+            display: flex; gap: 4px; margin-bottom: 12px;
+            background: var(--bg); padding: 4px; border-radius: 10px;
+            border: 1px solid var(--border);
+        }
+        .tab {
+            flex: 1; padding: 9px 12px; border: none; cursor: pointer;
+            background: transparent; color: var(--text-dim);
+            font-size: 13px; font-weight: 500; border-radius: 7px;
+            transition: all 0.15s; font-family: inherit;
+        }
+        .tab:hover { color: var(--text); }
+        .tab.active {
+            background: var(--bg-card-hover); color: var(--primary);
+        }
+        .tab-panel { display: none; }
+        .tab-panel.active { display: block; }
+
+        .toast {
+            position: fixed; bottom: 24px; right: 24px;
+            background: var(--bg-card); border: 1px solid var(--success);
+            border-left: 4px solid var(--success);
+            padding: 14px 18px; border-radius: 10px;
+            display: none; align-items: center; gap: 10px;
+            animation: slideIn 0.25s;
+            max-width: 360px; z-index: 200;
+        }
+        .toast.active { display: flex; }
+        .toast.error { border-color: var(--danger); border-left-color: var(--danger); }
+        @keyframes slideIn {
+            from { opacity: 0; transform: translateX(20px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        @media (max-width: 1024px) {
+            .stats { grid-template-columns: repeat(2, 1fr); }
+            .job { grid-template-columns: auto 1fr auto; }
+            .job-stats { display: none; }
+        }
+        @media (max-width: 720px) {
+            aside { display: none; }
+            main { padding: 20px; }
+            .form-row { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- ===== Sidebar ===== -->
+    <aside>
+        <div class="brand">
+            <div class="brand-icon">🪂</div>
+            <div class="brand-text">
+                SkyDive Pro
+                <small>{{ branding.nom or 'Montage IA' }}</small>
+            </div>
+        </div>
+
+        <nav>
+            <div class="nav-label">Principal</div>
+            <a class="nav-item active"><span class="icon">📊</span> Dashboard</a>
+            <a class="nav-item"><span class="icon">🆕</span> Nouveau saut <span class="badge">+</span></a>
+            <a class="nav-item"><span class="icon">👥</span> Passagers</a>
+            <a class="nav-item"><span class="icon">🎞️</span> Montages</a>
+
+            <div class="nav-label">Analyse</div>
+            <a class="nav-item"><span class="icon">📈</span> Statistiques</a>
+            <a class="nav-item"><span class="icon">💰</span> Facturation</a>
+
+            <div class="nav-label">Configuration</div>
+            <a class="nav-item"><span class="icon">🎨</span> Branding</a>
+            <a class="nav-item"><span class="icon">🤖</span> IA & APIs</a>
+            <a class="nav-item"><span class="icon">⚙️</span> Paramètres</a>
+        </nav>
+
+        <div class="sidebar-footer">
+            <span class="status-dot"></span>
+            <span>Serveur actif · v{{ version }}</span>
+        </div>
+    </aside>
+
+    <!-- ===== Main ===== -->
+    <main>
+        <div class="page-header">
+            <div class="page-title">
+                <h1>Bonjour 👋</h1>
+                <p>Aperçu de la journée en dropzone</p>
+            </div>
+            <button class="btn btn-primary" onclick="openModal()">
+                <span>+</span> Nouveau saut tandem
+            </button>
+        </div>
+
+        <div class="demo-banner">
+            🚧 <div><strong>Mode démo</strong> — données fictives. Le pipeline IA (télémétrie GoPro · Gemini · DeepFace · MediaPipe) sera connecté aux prochains jalons.</div>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">Sauts aujourd'hui</div>
+                <div class="stat-value">{{ jobs|length }}</div>
+                <div class="stat-hint"><span class="up">↑ +12%</span> vs hier</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Montages livrés</div>
+                <div class="stat-value">{{ jobs|selectattr('statut', 'equalto', 'termine')|list|length }}</div>
+                <div class="stat-hint">Temps moyen : 8 min</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Pipeline actif</div>
+                <div class="stat-value">{{ jobs|selectattr('statut', 'equalto', 'en_cours')|list|length }}</div>
+                <div class="stat-hint">IA en cours d'analyse</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Coût API (mois)</div>
+                <div class="stat-value">2,40 €</div>
+                <div class="stat-hint">Gemini free tier — budget 50 €</div>
+            </div>
+        </div>
+
+        <!-- Jobs -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">Sauts récents</div>
+                <span class="section-action">Voir tout →</span>
+            </div>
+            <div class="jobs">
+                {% for job in jobs %}
+                <div class="job">
+                    <div class="job-avatar">{{ job.passager[0] }}</div>
+                    <div class="job-info">
+                        <div class="name">{{ job.passager }}</div>
+                        <div class="meta">
+                            🕐 {{ job.date_saut }}
+                            {% if job.statut == 'en_cours' %}
+                                — {{ job.etape }}
+                                <div class="progress-bar"><div class="progress-fill" style="width: {{ job.progression }}%"></div></div>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% if job.statut == 'termine' %}
+                    <div class="job-stats">
+                        <div class="job-stat">
+                            <div class="job-stat-label">Altitude</div>
+                            <div class="job-stat-value">{{ job.altitude_max_m }} m</div>
+                        </div>
+                        <div class="job-stat">
+                            <div class="job-stat-label">Vitesse</div>
+                            <div class="job-stat-value">{{ job.vitesse_max_kmh }} km/h</div>
+                        </div>
+                        <div class="job-stat">
+                            <div class="job-stat-label">Chute</div>
+                            <div class="job-stat-value">{{ job.duree_chute_s }}s</div>
+                        </div>
+                    </div>
+                    <div class="job-status status-termine">✓ Livré</div>
+                    {% else %}
+                    <div></div>
+                    <div class="job-status status-encours">⚙ {{ job.progression }}%</div>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- Scenes -->
+        <div class="section">
+            <div class="section-header">
+                <div class="section-title">Scènes détectées par l'IA</div>
+            </div>
+            <div class="scenes-grid">
+                {% set scene_icons = {
+                    'briefing': '🗣️',
+                    'vehicule_embarquement': '🚐',
+                    'montee_avion': '✈️',
+                    'sortie_avion': '🎢',
+                    'chute_libre': '🌬️',
+                    'sous_voile': '🪂',
+                    'atterrissage': '🌍',
+                    'reaction_emotion': '😃',
+                    'interaction_moniteur': '🤝'
+                } %}
+                {% for scene in scenes %}
+                <div class="scene-card">
+                    <span class="scene-icon">{{ scene_icons.get(scene, '🎬') }}</span>
+                    <span class="scene-name">{{ scene.replace('_', ' ') }}</span>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+    </main>
+
+    <!-- ===== Modal Nouveau saut ===== -->
+    <div class="modal-overlay" id="modal">
+        <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <div class="modal-title">🪂 Nouveau saut tandem</div>
+                <button class="modal-close" onclick="closeModal()">×</button>
+            </div>
+            <form id="newJumpForm" onsubmit="submitForm(event)">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Prénom du passager <span class="required">*</span></label>
+                        <input type="text" class="form-input" name="prenom" required placeholder="Marie">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Nom <span class="required">*</span></label>
+                        <input type="text" class="form-input" name="nom" required placeholder="Dubois">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Email <span class="required">*</span></label>
+                    <input type="email" class="form-input" name="email" required placeholder="marie.dubois@example.fr">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label class="form-label">Téléphone (SMS)</label>
+                        <input type="tel" class="form-input" name="telephone" placeholder="+33 6 12 34 56 78">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Date du saut <span class="required">*</span></label>
+                        <input type="date" class="form-input" name="date_saut" required>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Moniteur tandem</label>
+                    <select class="form-select" name="moniteur">
+                        <option value="">— Sélectionner —</option>
+                        <option>Jean Rivière</option>
+                        <option>Thomas Blanc</option>
+                        <option>Lucie Perrin</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label class="form-label">Source vidéo <span class="required">*</span></label>
+                    <div class="tabs">
+                        <button type="button" class="tab active" data-tab="file">📁 Upload fichier</button>
+                        <button type="button" class="tab" data-tab="url">🔗 Lien (WeTransfer / Drive / YouTube...)</button>
+                    </div>
+
+                    <div class="tab-panel active" data-panel="file">
+                        <label class="file-drop" id="fileDrop">
+                            <div class="file-drop-icon">📹</div>
+                            <div class="file-drop-title" id="fileTitle">Cliquer ou glisser la vidéo ici</div>
+                            <div class="file-drop-hint" id="fileHint">MP4, MOV, max 20 Go — télémétrie GPMF si GoPro</div>
+                            <input type="file" name="video" accept="video/*" id="fileInput">
+                        </label>
+                    </div>
+
+                    <div class="tab-panel" data-panel="url">
+                        <input type="url" class="form-input" name="video_url" id="videoUrl"
+                               placeholder="https://we.tl/t-xxx ou https://drive.google.com/... ou YouTube...">
+                        <div class="file-drop-hint" style="margin-top:8px">
+                            Supporté : <b>WeTransfer</b>, <b>Google Drive</b>, <b>Dropbox</b>, <b>YouTube</b>, <b>Vimeo</b>, URL directe .mp4
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-actions">
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Annuler</button>
+                    <button type="submit" class="btn btn-primary">🚀 Lancer le montage IA</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="toast" id="toast">
+        <span id="toastIcon">✓</span>
+        <span id="toastMsg">Message</span>
+    </div>
+
+    <script>
+        // ───── Date par défaut ─────
+        document.querySelector('input[name="date_saut"]').value = new Date().toISOString().split('T')[0];
+
+        // ───── Modal ─────
+        const modal = document.getElementById('modal');
+        function openModal() { modal.classList.add('active'); }
+        function closeModal() { modal.classList.remove('active'); }
+        modal.addEventListener('click', closeModal);
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+        // ───── File drop ─────
+        const fileInput = document.getElementById('fileInput');
+        const fileDrop = document.getElementById('fileDrop');
+        const fileTitle = document.getElementById('fileTitle');
+        const fileHint = document.getElementById('fileHint');
+
+        fileInput.addEventListener('change', () => updateFileUI(fileInput.files[0]));
+
+        ['dragenter', 'dragover'].forEach(ev => fileDrop.addEventListener(ev, e => {
+            e.preventDefault(); fileDrop.classList.add('drag-over');
+        }));
+        ['dragleave', 'drop'].forEach(ev => fileDrop.addEventListener(ev, e => {
+            e.preventDefault(); fileDrop.classList.remove('drag-over');
+        }));
+        fileDrop.addEventListener('drop', e => {
+            if (e.dataTransfer.files[0]) {
+                fileInput.files = e.dataTransfer.files;
+                updateFileUI(e.dataTransfer.files[0]);
+            }
+        });
+
+        function updateFileUI(file) {
+            if (!file) return;
+            fileDrop.classList.add('has-file');
+            fileTitle.textContent = '✓ ' + file.name;
+            const mb = (file.size / (1024 * 1024)).toFixed(1);
+            fileHint.textContent = mb + ' MB · prêt pour analyse télémétrie';
+        }
+
+        // ───── Tabs Upload / URL ─────
+        let currentSource = 'file';
+        document.querySelectorAll('.tab').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+                btn.classList.add('active');
+                const tab = btn.dataset.tab;
+                document.querySelector('[data-panel="' + tab + '"]').classList.add('active');
+                currentSource = tab;
+            });
+        });
+
+        // ───── Form submit ─────
+        async function submitForm(e) {
+            e.preventDefault();
+            const form = e.target;
+
+            try {
+                let res;
+                if (currentSource === 'file') {
+                    if (!fileInput.files[0]) {
+                        showToast('✗', 'Aucune vidéo sélectionnée', true);
+                        return;
+                    }
+                    res = await fetch('/api/nouveau-saut', {
+                        method: 'POST', body: new FormData(form),
+                    });
+                } else {
+                    const url = document.getElementById('videoUrl').value.trim();
+                    if (!url) {
+                        showToast('✗', 'URL manquante', true);
+                        return;
+                    }
+                    const payload = {
+                        url,
+                        prenom: form.prenom.value, nom: form.nom.value,
+                        email: form.email.value, date_saut: form.date_saut.value,
+                        moniteur: form.moniteur.value,
+                    };
+                    res = await fetch('/api/import-url', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify(payload),
+                    });
+                }
+
+                const json = await res.json();
+                if (res.ok) {
+                    showToast('✓', 'Saut enregistré ! Job ' + json.job_id + ' lancé.', false);
+                    closeModal();
+                    setTimeout(() => window.location.reload(), 1500);
+                } else {
+                    showToast('✗', 'Erreur : ' + (json.erreur || 'inconnue'), true);
+                }
+            } catch (err) {
+                showToast('✗', 'Erreur réseau : ' + err.message, true);
+            }
+        }
+
+        function showToast(icon, msg, isError) {
+            const t = document.getElementById('toast');
+            document.getElementById('toastIcon').textContent = icon;
+            document.getElementById('toastMsg').textContent = msg;
+            t.classList.toggle('error', !!isError);
+            t.classList.add('active');
+            setTimeout(() => t.classList.remove('active'), 4000);
+        }
+
+        // ───── Auto-refresh soft ─────
+        setTimeout(() => window.location.reload(), 60000);
+    </script>
+</body>
+</html>
