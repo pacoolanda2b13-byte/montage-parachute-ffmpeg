@@ -1,6 +1,6 @@
 # 🪂 SkyDive Pro — Montage Auto IA pour Tandems
 
-**Plateforme de montage vidéo automatique** destinée aux **dropzones de saut en parachute tandem**. Transforme chaque vidéo brute GoPro (~15 min) en un **condensé professionnel de 3-4 min**, prêt à livrer au passager — intro brandée, overlays stylisés, musique synchronisée, transitions cinéma.
+**Plateforme de montage vidéo automatique** destinée aux **dropzones de saut en parachute tandem**. Transforme chaque vidéo brute GoPro (~15 min) en un **condensé professionnel de 6 à 7 min**, prêt à livrer au passager — intro brandée, overlays stylisés, musique synchronisée, transitions cinéma.
 
 > *« Le passager saute. Le montage est dans sa boîte mail avant qu'il rentre chez lui. »*
 
