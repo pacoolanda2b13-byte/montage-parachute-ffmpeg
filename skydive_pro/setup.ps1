@@ -5,95 +5,217 @@
 # ====================================================================
 
 $ErrorActionPreference = "Stop"
+$STEPS = 9
+
+function Write-Step { param($n, $msg) Write-Host "" ; Write-Host "[$n/$STEPS] $msg" -ForegroundColor Yellow }
+function Write-OK   { param($msg) Write-Host "  OK $msg" -ForegroundColor Green }
+function Write-WARN { param($msg) Write-Host "  ATTENTION $msg" -ForegroundColor Yellow }
+function Write-ERR  { param($msg) Write-Host "  ERREUR $msg" -ForegroundColor Red }
 
 Write-Host ""
-Write-Host "🪂  SkyDive Pro - Installation Windows" -ForegroundColor Cyan
-Write-Host "====================================" -ForegroundColor Cyan
+Write-Host "  SkyDive Pro - Installation Windows" -ForegroundColor Cyan
+Write-Host "  =====================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ─── 1. Vérifier Python ──────────────────────────────────
-Write-Host "[1/6] Vérification de Python..." -ForegroundColor Yellow
-try {
-    $pythonVersion = python --version 2>&1
-    Write-Host "  ✓ $pythonVersion" -ForegroundColor Green
-} catch {
-    Write-Host "  ✗ Python non détecté." -ForegroundColor Red
-    Write-Host "    Installe Python 3.11+ depuis https://www.python.org/downloads/" -ForegroundColor Red
-    Write-Host "    (⚠️  coche bien 'Add Python to PATH' pendant l'installation)" -ForegroundColor Red
+# ─── Determine script location ──────────────────────────────────────────────
+# Support both: running from inside skydive_pro/ or from project root
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+Set-Location $ScriptDir
+
+
+# ─── [1/9] Verifier Python 3.11+ ─────────────────────────────────────────────
+Write-Step "1" "Verification de Python 3.11+..."
+
+$pythonCmd = $null
+foreach ($cmd in @("python", "python3", "py")) {
+    try {
+        $ver = & $cmd --version 2>&1
+        if ($ver -match "Python (\d+)\.(\d+)") {
+            $major = [int]$Matches[1]
+            $minor = [int]$Matches[2]
+            if ($major -gt 3 -or ($major -eq 3 -and $minor -ge 11)) {
+                $pythonCmd = $cmd
+                break
+            }
+        }
+    } catch { }
+}
+
+if (-not $pythonCmd) {
+    Write-ERR "Python 3.11+ non detecte."
+    Write-Host "    Installe Python 3.11 ou superieur depuis https://www.python.org/downloads/" -ForegroundColor Red
+    Write-Host "    (Coche bien 'Add Python to PATH' pendant l'installation)" -ForegroundColor Red
+    Write-Host ""
     exit 1
 }
 
-# ─── 2. Vérifier FFmpeg ──────────────────────────────────
-Write-Host ""
-Write-Host "[2/6] Vérification de FFmpeg..." -ForegroundColor Yellow
-try {
-    $ffmpegVersion = ffmpeg -version 2>&1 | Select-Object -First 1
-    Write-Host "  ✓ $ffmpegVersion" -ForegroundColor Green
+$pyVer = & $pythonCmd --version 2>&1
+Write-OK "$pyVer detecte ($pythonCmd)"
 
-    # Check AMF encoder (AMD)
-    $hasAmf = (ffmpeg -hide_banner -encoders 2>&1 | Select-String "h264_amf") -ne $null
-    if ($hasAmf) {
-        Write-Host "  ✓ Encodeur AMD AMF disponible (accélération hardware)" -ForegroundColor Green
+
+# ─── [2/9] Verifier FFmpeg ────────────────────────────────────────────────────
+Write-Step "2" "Verification de FFmpeg..."
+
+$ffmpegOk = $false
+try {
+    $ffVer = ffmpeg -version 2>&1 | Select-Object -First 1
+    $ffmpegOk = $true
+    Write-OK $ffVer
+
+    # Hardware encoder check
+    $encoders = ffmpeg -hide_banner -encoders 2>&1
+    if ($encoders | Select-String "h264_amf") {
+        Write-OK "Encodeur AMD AMF disponible (acceleration hardware)"
+    } elseif ($encoders | Select-String "h264_nvenc") {
+        Write-OK "Encodeur NVIDIA NVENC disponible (acceleration hardware)"
     } else {
-        Write-Host "  ⚠ Encodeur AMD AMF non détecté — encodage CPU only" -ForegroundColor Yellow
+        Write-WARN "Aucun encodeur hardware detecte — encodage CPU uniquement"
     }
 } catch {
-    Write-Host "  ✗ FFmpeg non détecté." -ForegroundColor Red
-    Write-Host "    Installation : winget install ffmpeg" -ForegroundColor Red
-    Write-Host "    Puis redémarre PowerShell." -ForegroundColor Red
+    Write-WARN "FFmpeg non detecte. Tentative d'installation via winget..."
+    try {
+        winget install --id Gyan.FFmpeg --silent --accept-package-agreements --accept-source-agreements
+        Write-OK "FFmpeg installe via winget. Redemarrage de PowerShell recommande apres ce script."
+        $ffmpegOk = $true
+    } catch {
+        Write-WARN "Installation automatique echouee."
+        Write-Host "    Installe manuellement : winget install ffmpeg" -ForegroundColor Yellow
+        Write-Host "    Puis redемarre PowerShell et relance ce script." -ForegroundColor Yellow
+        Write-Host "    (le script continue, mais le pipeline ne fonctionnera pas sans FFmpeg)" -ForegroundColor Yellow
+    }
+}
+
+
+# ─── [3/9] Creer le venv ─────────────────────────────────────────────────────
+Write-Step "3" "Creation de l'environnement virtuel Python (.venv)..."
+
+if (-not (Test-Path ".venv")) {
+    & $pythonCmd -m venv .venv
+    if ($LASTEXITCODE -ne 0) {
+        Write-ERR "Echec de la creation du venv. Assure-toi que python3-venv est installe."
+        exit 1
+    }
+    Write-OK ".venv cree"
+} else {
+    Write-OK ".venv deja existant"
+}
+
+
+# ─── [4/9] Activer le venv et installer les dependances ──────────────────────
+Write-Step "4" "Installation des dependances Python..."
+Write-Host "  (peut prendre 5-10 minutes la 1ere fois — TensorFlow / DeepFace sont volumineux)" -ForegroundColor DarkGray
+
+$activateScript = ".\.venv\Scripts\Activate.ps1"
+if (-not (Test-Path $activateScript)) {
+    Write-ERR "Script d'activation du venv introuvable : $activateScript"
+    exit 1
+}
+& $activateScript
+
+$pipExe = ".\.venv\Scripts\pip.exe"
+$pythonVenv = ".\.venv\Scripts\python.exe"
+
+& $pythonVenv -m pip install --upgrade pip --quiet
+if ($LASTEXITCODE -ne 0) {
+    Write-ERR "Echec de la mise a jour de pip."
     exit 1
 }
 
-# ─── 3. Créer le venv ───────────────────────────────────
-Write-Host ""
-Write-Host "[3/6] Création de l'environnement virtuel Python..." -ForegroundColor Yellow
-if (-not (Test-Path ".venv")) {
-    python -m venv .venv
-    Write-Host "  ✓ .venv créé" -ForegroundColor Green
-} else {
-    Write-Host "  ✓ .venv déjà existant" -ForegroundColor Green
+& $pipExe install -r requirements.txt
+if ($LASTEXITCODE -ne 0) {
+    Write-ERR "Echec de l'installation des dependances (pip install -r requirements.txt)."
+    Write-Host "    Verifie ta connexion internet et les erreurs ci-dessus." -ForegroundColor Red
+    exit 1
 }
+Write-OK "Dependances installees"
 
-# ─── 4. Activer le venv et installer les deps ──────────
-Write-Host ""
-Write-Host "[4/6] Installation des dépendances Python..." -ForegroundColor Yellow
-Write-Host "  (ça peut prendre 5-10 minutes la 1ère fois — TensorFlow/DeepFace sont volumineux)" -ForegroundColor DarkGray
-& .\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip --quiet
-pip install -r requirements.txt
-Write-Host "  ✓ Dépendances installées" -ForegroundColor Green
 
-# ─── 5. Copier les fichiers de config ───────────────────
-Write-Host ""
-Write-Host "[5/6] Initialisation de la configuration..." -ForegroundColor Yellow
+# ─── [5/9] Creer .env depuis .env.example ────────────────────────────────────
+Write-Step "5" "Initialisation de la configuration (.env)..."
+
 if (-not (Test-Path ".env")) {
-    Copy-Item .env.example .env
-    Write-Host "  ✓ .env créé — ⚠️  remplis-le avec tes clés API !" -ForegroundColor Yellow
+    if (Test-Path ".env.example") {
+        Copy-Item ".env.example" ".env"
+        Write-WARN ".env cree depuis .env.example — remplis-le avec tes cles API !"
+    } else {
+        Write-WARN ".env.example introuvable — cree .env manuellement."
+    }
 } else {
-    Write-Host "  ✓ .env existe déjà" -ForegroundColor Green
+    Write-OK ".env existe deja"
 }
 
-if (-not (Test-Path "config\config.yaml")) {
-    Copy-Item config\config.yaml.example config\config.yaml
-    Write-Host "  ✓ config.yaml créé" -ForegroundColor Green
-} else {
-    Write-Host "  ✓ config.yaml existe déjà" -ForegroundColor Green
+
+# ─── [6/9] Creer les repertoires necessaires ─────────────────────────────────
+Write-Step "6" "Creation des repertoires necessaires..."
+
+$dirs = @(
+    "sources",
+    "output",
+    "assets\music",
+    "assets\luts",
+    "assets\branding"
+)
+
+foreach ($d in $dirs) {
+    if (-not (Test-Path $d)) {
+        New-Item -ItemType Directory -Path $d -Force | Out-Null
+        Write-OK "Cree : $d"
+    } else {
+        Write-OK "Existe : $d"
+    }
 }
 
-# ─── 6. Récap ────────────────────────────────────────────
+
+# ─── [7/9] Initialiser la base de donnees SQLite ─────────────────────────────
+Write-Step "7" "Initialisation de la base de donnees SQLite..."
+
+try {
+    & $pythonVenv -c "from db.models import init_db; init_db()"
+    if ($LASTEXITCODE -ne 0) { throw "exit code $LASTEXITCODE" }
+    Write-OK "Base de donnees initialisee"
+} catch {
+    Write-WARN "Echec de l'initialisation de la BDD : $_"
+    Write-Host "    Tu pourras relancer : .venv\Scripts\python.exe -c `"from db.models import init_db; init_db()`"" -ForegroundColor Yellow
+}
+
+
+# ─── [8/9] Lancer les tests ───────────────────────────────────────────────────
+Write-Step "8" "Lancement des tests (pytest tests/ -v)..."
+
+$pytestExe = ".\.venv\Scripts\pytest.exe"
+try {
+    & $pytestExe tests/ -v
+    if ($LASTEXITCODE -ne 0) {
+        Write-WARN "Certains tests ont echoue (voir ci-dessus). Le pipeline peut quand meme fonctionner."
+    } else {
+        Write-OK "Tous les tests passent"
+    }
+} catch {
+    Write-WARN "Impossible de lancer pytest : $_"
+}
+
+
+# ─── [9/9] Resume et prochaines etapes ───────────────────────────────────────
+Write-Step "9" "Installation terminee !"
 Write-Host ""
-Write-Host "[6/6] Installation terminée ! 🎉" -ForegroundColor Green
+Write-Host "  Prochaines etapes :" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Prochaines étapes :" -ForegroundColor Cyan
-Write-Host "  1. Édite le fichier .env et renseigne au moins GEMINI_API_KEY" -ForegroundColor White
-Write-Host "     → Obtenir une clé gratuite : https://aistudio.google.com/app/apikey" -ForegroundColor DarkGray
+Write-Host "  1. Edite .env et renseigne au moins GEMINI_API_KEY" -ForegroundColor White
+Write-Host "     Obtenir une cle gratuite : https://aistudio.google.com/app/apikey" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  2. Édite config\config.yaml pour ton branding dropzone" -ForegroundColor White
+Write-Host "  2. Place une video GoPro test dans sources\" -ForegroundColor White
 Write-Host ""
 Write-Host "  3. Place ton logo dans assets\branding\logo_dropzone.png" -ForegroundColor White
 Write-Host ""
-Write-Host "  4. Place une vidéo GoPro test dans sources\" -ForegroundColor White
-Write-Host ""
-Write-Host "  5. Active le venv avant chaque session de dev :" -ForegroundColor White
+Write-Host "  4. Active le venv avant chaque session de dev :" -ForegroundColor White
 Write-Host "     .\.venv\Scripts\Activate.ps1" -ForegroundColor DarkGray
 Write-Host ""
+Write-Host "  5. Lance le pipeline :" -ForegroundColor White
+Write-Host "     .venv\Scripts\python.exe -m agent.pipeline sources\ta_video.mp4 'Prenom Passager'" -ForegroundColor DarkGray
+Write-Host ""
+
+if (-not $ffmpegOk) {
+    Write-Host "  ATTENTION : FFmpeg n'est pas installe — installe-le avant d'utiliser le pipeline." -ForegroundColor Yellow
+    Write-Host "              winget install ffmpeg" -ForegroundColor Yellow
+    Write-Host ""
+}

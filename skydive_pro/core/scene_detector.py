@@ -348,7 +348,7 @@ def classify_keyframes_with_gemini(frames: list[tuple[float, Path]],
     use_new_sdk = False
     new_client = None
     old_model = None
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
     try:
         from google import genai as genai_new

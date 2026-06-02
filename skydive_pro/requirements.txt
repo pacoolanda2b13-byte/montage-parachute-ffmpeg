@@ -31,15 +31,13 @@ opencv-python>=4.9.0
 Pillow>=10.2.0
 
 # ──── IA : Détection visages & émotions (local, gratuit) ────
-deepface>=0.0.90
-tf-keras>=2.15.0
-
-# ──── IA : Pose & gestes (local, gratuit) ────
-mediapipe>=0.10.9
+# deepface>=0.0.90       # désactivé : incompatible Python 3.14 (tensorflow)
+# tf-keras>=2.15.0       # désactivé : idem
+# mediapipe>=0.10.9      # désactivé : idem — à réactiver quand jalons 2b/2c implémentés
 
 # ──── IA : APIs cloud ────
 # Gemini (gratuit, 1500 req/jour)
-google-generativeai>=0.4.0
+google-genai>=1.0.0
 # Claude (optionnel, fallback premium)
 anthropic>=0.21.0
 

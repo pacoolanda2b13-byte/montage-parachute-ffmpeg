@@ -1,25 +1,31 @@
 """
-serveur_api.py — SkyDive Pro API (v0 démo)
+serveur_api.py — SkyDive Pro API v2
 
-Serveur Flask minimal pour démontrer l'interface et la vision avant
-l'implémentation des modules IA.
+Serveur Flask avec persistance SQLite et pipeline multi-fichiers.
 
 Routes :
-    GET  /                 → Dashboard staff dropzone
-    GET  /sante            → Health-check JSON
-    GET  /api/config       → Config active (branding, scènes, etc.)
-    GET  /api/demo/jobs    → Jobs fictifs pour démo
-    POST /api/upload       → (mock) Upload d'une vidéo brute
+    GET  /                        → Dashboard staff dropzone
+    GET  /sante                   → Health-check JSON
+    GET  /api/config              → Config active
+    POST /api/nouveau-saut        → Upload fichier unique + pipeline
+    POST /api/nouveau-saut-folder → Import dossier rushs + pipeline multi-fichiers
+    POST /api/import-url          → Import depuis URL + pipeline
+    GET  /api/job/<job_id>        → Statut d'un job
+    GET  /api/jobs                → Liste des jobs récents
+    GET  /output/<filename>       → Servir les montages finaux
 
 Lancement :
     cd skydive_pro
     python api/serveur_api.py
 """
 
+import json as _json
 import os
 import sys
 import threading
-from datetime import datetime, timedelta
+import traceback as _tb
+import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +51,10 @@ except ImportError:
     yaml = None
     log.warning("pyyaml non installé — config.yaml ignoré")
 
+from db.models import (
+    init_db, get_or_create_client, create_saut, update_saut,
+    get_saut, list_sauts, saut_to_dict,
+)
 
 app = Flask(
     __name__,
@@ -65,69 +75,38 @@ if yaml:
             CONFIG = yaml.safe_load(f) or {}
 
 
-def mock_jobs():
-    """Jobs fictifs pour démontrer le dashboard."""
-    now = datetime.now()
-    return [
-        {
-            "id": "job-001",
-            "passager": "Marie Dubois",
-            "date_saut": (now - timedelta(minutes=15)).strftime("%H:%M"),
-            "statut": "termine",
-            "altitude_max_m": 4050,
-            "vitesse_max_kmh": 212,
-            "duree_chute_s": 58,
-            "email_envoye": True,
-        },
-        {
-            "id": "job-002",
-            "passager": "Paul Martin",
-            "date_saut": (now - timedelta(minutes=8)).strftime("%H:%M"),
-            "statut": "en_cours",
-            "etape": "Détection émotions au sol",
-            "progression": 72,
-        },
-        {
-            "id": "job-003",
-            "passager": "Sarah Leroy",
-            "date_saut": (now - timedelta(minutes=3)).strftime("%H:%M"),
-            "statut": "en_cours",
-            "etape": "Extraction télémétrie GoPro",
-            "progression": 15,
-        },
-        {
-            "id": "job-004",
-            "passager": "Antoine Garcia",
-            "date_saut": (now - timedelta(hours=2)).strftime("%H:%M"),
-            "statut": "termine",
-            "altitude_max_m": 3980,
-            "vitesse_max_kmh": 208,
-            "duree_chute_s": 55,
-            "email_envoye": True,
-        },
-        {
-            "id": "job-005",
-            "passager": "Julie Bernard",
-            "date_saut": (now - timedelta(hours=3)).strftime("%H:%M"),
-            "statut": "termine",
-            "altitude_max_m": 4100,
-            "vitesse_max_kmh": 219,
-            "duree_chute_s": 61,
-            "email_envoye": True,
-        },
-    ]
+def _branding_paths():
+    branding = CONFIG.get("branding", {}) or {}
+    logo = branding.get("logo")
+    logo_path = BASE_DIR / logo if logo else None
+    music_cfg = (CONFIG.get("musique", {}) or {}).get("piste_defaut")
+    music_path = BASE_DIR / music_cfg if music_cfg else None
+    return branding, logo_path, music_path
 
+
+# ══════════════════════════════════════════════════════════════
+#  Routes
+# ══════════════════════════════════════════════════════════════
 
 @app.route("/")
 def index():
     branding = CONFIG.get("branding", {}) or {}
     scenes = [s["nom"] for s in (CONFIG.get("structure", {}) or {}).get("scenes", [])]
+    # Vrais jobs depuis la DB
+    sauts = list_sauts(limit=20)
+    jobs = []
+    for s in sauts:
+        d = saut_to_dict(s)
+        # Adapter pour le template existant
+        d["passager"] = f"{s.client.prenom} {s.client.nom}" if s.client else "?"
+        d["statut"] = "termine" if s.statut == "succes" else s.statut
+        jobs.append(d)
     return render_template(
         "dashboard.html",
         branding=branding,
         scenes=scenes,
-        jobs=mock_jobs(),
-        version="0.1.0-demo",
+        jobs=jobs,
+        version="2.0.0",
     )
 
 
@@ -137,7 +116,7 @@ def sante():
     ffmpeg_ok = _sh.which("ffmpeg") is not None
     return jsonify({
         "statut": "ok" if ffmpeg_ok else "degraded",
-        "version": "0.1.0-demo",
+        "version": "2.0.0",
         "ffmpeg": "disponible" if ffmpeg_ok else "introuvable",
         "config_chargee": bool(CONFIG),
         "timestamp": datetime.now().isoformat(),
@@ -153,33 +132,25 @@ def api_config():
     })
 
 
-@app.route("/api/demo/jobs")
-def api_demo_jobs():
-    return jsonify({"jobs": mock_jobs()})
+@app.route("/api/jobs")
+def api_jobs():
+    limit = request.args.get("limit", 50, type=int)
+    statut = request.args.get("statut")
+    sauts = list_sauts(limit=limit, statut=statut)
+    return jsonify({"jobs": [saut_to_dict(s) for s in sauts]})
 
 
-JOBS_STATE: dict = {}
-_JOBS_LOCK = threading.Lock()
+@app.route("/api/templates")
+def api_templates():
+    from core.templates import list_templates
+    return jsonify({"templates": list_templates()})
 
 
-def _update_job(job_id: str, **fields) -> None:
-    with _JOBS_LOCK:
-        state = JOBS_STATE.setdefault(job_id, {})
-        state.update(fields)
-
-
-def _get_job(job_id: str) -> Optional[dict]:
-    with _JOBS_LOCK:
-        state = JOBS_STATE.get(job_id)
-        return dict(state) if state else None
-
+# ── Upload fichier unique ────────────────────────────────────
 
 @app.route("/api/nouveau-saut", methods=["POST"])
 def api_nouveau_saut():
-    """Enregistre un nouveau saut + lance le pipeline IA en arrière-plan."""
     from werkzeug.utils import secure_filename
-    import threading
-    import uuid
 
     prenom = request.form.get("prenom", "").strip()
     nom = request.form.get("nom", "").strip()
@@ -187,6 +158,7 @@ def api_nouveau_saut():
     date_saut = request.form.get("date_saut", "").strip()
     moniteur = request.form.get("moniteur", "").strip()
     telephone = request.form.get("telephone", "").strip()
+    lieu = request.form.get("lieu", "").strip()
 
     if not (prenom and nom and email and date_saut):
         return jsonify({"erreur": "Champs obligatoires manquants"}), 400
@@ -203,35 +175,20 @@ def api_nouveau_saut():
 
     try:
         video.save(str(dest))
-        taille_mb = dest.stat().st_size / (1024 * 1024)
     except Exception as e:
         return jsonify({"erreur": f"Erreur sauvegarde : {e}"}), 500
 
-    # État initial — thread-safe
-    _update_job(job_id,
-                 statut="en_cours",
-                 etape="Enregistrement terminé, démarrage pipeline...",
-                 progression=0,
-                 passager=f"{prenom} {nom}",
-                 email=email,
-                 date_saut=date_saut,
-                 moniteur=moniteur,
-                 fichier_source=safe_name,
-                 taille_mb=round(taille_mb, 1))
+    # DB
+    client = get_or_create_client(prenom, nom, email, telephone)
+    create_saut(job_id=job_id, client_id=client.id, date_saut=date_saut,
+                lieu=lieu, moniteur=moniteur, statut="en_cours",
+                etape="Enregistrement terminé, démarrage pipeline...")
 
-    # Lancer le pipeline en arrière-plan (non-bloquant)
     def run_pipeline():
         try:
             from agent.pipeline import process_jump
-            import traceback as _tb
-            branding = CONFIG.get("branding", {}) or {}
-            _update_job(job_id, etape="Extraction télémétrie GoPro",
-                         progression=10)
-
-            logo = branding.get("logo")
-            logo_path = BASE_DIR / logo if logo else None
-            music_cfg = (CONFIG.get("musique", {}) or {}).get("piste_defaut")
-            music_path = BASE_DIR / music_cfg if music_cfg else None
+            branding, logo_path, music_path = _branding_paths()
+            update_saut(job_id, etape="Extraction télémétrie GoPro", progression=10)
 
             result = process_jump(
                 video_path=dest,
@@ -246,38 +203,112 @@ def api_nouveau_saut():
                 music_path=music_path if music_path and music_path.exists() else None,
                 output_dir=BASE_DIR / "output",
             )
-            _update_job(job_id,
-                         statut=result.statut,
-                         etape="Terminé" if result.statut == "succes" else "Erreur",
-                         progression=100,
-                         resultat=result.to_dict())
+            update_saut(job_id,
+                        statut=result.statut,
+                        etape="Terminé" if result.statut == "succes" else "Erreur",
+                        progression=100,
+                        fichier_montage=result.fichier_montage,
+                        taille_montage_mb=result.taille_montage_mb,
+                        duree_traitement_s=result.duree_traitement_s,
+                        altitude_max_m=result.analyse_telemetrie.get("altitude_max_m"),
+                        vitesse_max_kmh=result.analyse_telemetrie.get("vitesse_max_kmh"),
+                        duree_chute_s=result.analyse_telemetrie.get("duree_chute_libre_s"),
+                        erreurs=_json.dumps(result.erreurs) if result.erreurs else None)
         except Exception as e:
-            log.exception("[%s] Pipeline exception non gérée", job_id)
-            _update_job(job_id,
-                         statut="echec",
-                         etape=f"Erreur : {e}",
-                         progression=0,
-                         traceback=_tb.format_exc())
+            log.exception("[%s] Pipeline exception", job_id)
+            update_saut(job_id, statut="echec", etape=f"Erreur : {e}",
+                        progression=0, erreurs=_json.dumps([str(e)]))
 
     threading.Thread(target=run_pipeline, daemon=True).start()
+    return jsonify({"job_id": job_id, "statut": "en_cours",
+                    "message": "Pipeline lancé."}), 202
 
-    return jsonify({
-        "job_id": job_id,
-        "statut": "en_cours",
-        "message": "Pipeline IA lancé en arrière-plan.",
-        "passager": f"{prenom} {nom}",
-        "fichier": safe_name,
-        "taille_mb": round(taille_mb, 1),
-    }), 202
 
+# ── Upload dossier multi-fichiers ────────────────────────────
+
+@app.route("/api/nouveau-saut-folder", methods=["POST"])
+def api_nouveau_saut_folder():
+    """Reçoit un chemin de dossier local (JSON) et lance le pipeline multi-fichiers."""
+    data = request.get_json(silent=True) or {}
+    folder = (data.get("folder") or "").strip()
+    prenom = (data.get("prenom") or "").strip()
+    nom = (data.get("nom") or "").strip()
+    email = (data.get("email") or "").strip()
+    date_saut = (data.get("date_saut") or "").strip()
+    lieu = (data.get("lieu") or "").strip()
+    moniteur = (data.get("moniteur") or "").strip()
+    telephone = (data.get("telephone") or "").strip()
+    template_name = (data.get("template") or "fun_energie").strip()
+
+    if not folder or not Path(folder).is_dir():
+        return jsonify({"erreur": "Dossier invalide ou introuvable"}), 400
+    if not (prenom and nom and date_saut):
+        return jsonify({"erreur": "Champs obligatoires manquants"}), 400
+
+    job_id = f"job-{uuid.uuid4().hex[:8]}"
+
+    client = get_or_create_client(prenom, nom, email, telephone)
+    create_saut(job_id=job_id, client_id=client.id, date_saut=date_saut,
+                lieu=lieu, moniteur=moniteur, statut="en_cours",
+                dossier_source=folder,
+                etape="Analyse du dossier de rushs...")
+
+    def run_folder_pipeline():
+        try:
+            from agent.pipeline import process_folder
+            branding, logo_path, music_path = _branding_paths()
+
+            update_saut(job_id, etape="Analyse et ordonnancement des fichiers...",
+                        progression=10)
+
+            result = process_folder(
+                folder_path=folder,
+                nom_passager=f"{prenom} {nom}",
+                email_client=email,
+                date_saut=date_saut,
+                lieu=lieu,
+                job_id=job_id,
+                moniteur=moniteur,
+                dropzone_nom=branding.get("nom", ""),
+                dropzone_site=branding.get("site_web", ""),
+                logo_path=logo_path if logo_path and logo_path.exists() else None,
+                music_path=music_path if music_path and music_path.exists() else None,
+                output_dir=BASE_DIR / "output",
+                template_name=template_name,
+            )
+            reels_json = _json.dumps([
+                {"type": r.get("type"), "path": str(r.get("path", "")),
+                 "duree_s": r.get("duree_s"), "ok": r.get("ok")}
+                for r in result.reels
+            ]) if result.reels else None
+
+            update_saut(job_id,
+                        statut=result.statut,
+                        etape="Terminé" if result.statut == "succes" else "Erreur",
+                        progression=100,
+                        fichier_montage=result.fichier_montage,
+                        taille_montage_mb=result.taille_montage_mb,
+                        reels=reels_json,
+                        duree_traitement_s=result.duree_traitement_s,
+                        altitude_max_m=result.analyse_telemetrie.get("altitude_max_m"),
+                        vitesse_max_kmh=result.analyse_telemetrie.get("vitesse_max_kmh"),
+                        duree_chute_s=result.analyse_telemetrie.get("duree_chute_libre_s"),
+                        erreurs=_json.dumps(result.erreurs) if result.erreurs else None)
+        except Exception as e:
+            log.exception("[%s] Folder pipeline exception", job_id)
+            update_saut(job_id, statut="echec", etape=f"Erreur : {e}",
+                        progression=0, erreurs=_json.dumps([str(e)]))
+
+    threading.Thread(target=run_folder_pipeline, daemon=True).start()
+    return jsonify({"job_id": job_id, "statut": "en_cours",
+                    "message": "Pipeline multi-fichiers lancé."}), 202
+
+
+# ── Import URL ───────────────────────────────────────────────
 
 @app.route("/api/import-url", methods=["POST"])
 def api_import_url():
-    """Télécharge une vidéo depuis une URL (YouTube, WeTransfer, Drive, Dropbox, direct)
-    puis lance le pipeline IA."""
     from werkzeug.utils import secure_filename
-    import threading
-    import uuid
 
     data = request.get_json(silent=True) or {}
     url = (data.get("url") or "").strip()
@@ -290,42 +321,27 @@ def api_import_url():
     if not url:
         return jsonify({"erreur": "URL manquante"}), 400
     if not (prenom and nom and email and date_saut):
-        return jsonify({"erreur": "Champs obligatoires manquants (prenom/nom/email/date_saut)"}), 400
+        return jsonify({"erreur": "Champs obligatoires manquants"}), 400
 
     sources_dir = BASE_DIR / "sources"
     sources_dir.mkdir(exist_ok=True)
     job_id = f"job-{uuid.uuid4().hex[:8]}"
 
-    _update_job(job_id,
-                 statut="en_cours",
-                 etape="Téléchargement de la vidéo depuis l'URL...",
-                 progression=5,
-                 passager=f"{prenom} {nom}",
-                 email=email,
-                 date_saut=date_saut,
-                 moniteur=moniteur,
-                 source_url=url)
+    client = get_or_create_client(prenom, nom, email)
+    create_saut(job_id=job_id, client_id=client.id, date_saut=date_saut,
+                moniteur=moniteur, statut="en_cours",
+                etape="Téléchargement de la vidéo...")
 
     def run_import_and_pipeline():
-        import traceback as _tb
         try:
             from core.url_importer import import_from_url
             from agent.pipeline import process_jump
+            branding, logo_path, music_path = _branding_paths()
 
             safe_name = secure_filename(f"{job_id}_saut")
             imp = import_from_url(url, sources_dir, nom_fichier=safe_name)
-
-            _update_job(job_id, etape=f"Téléchargé ({imp.taille_mb:.1f} MB) — démarrage IA...",
-                         progression=15,
-                         fichier_source=imp.path.name,
-                         taille_mb=round(imp.taille_mb, 1),
-                         source_type=imp.source)
-
-            branding = CONFIG.get("branding", {}) or {}
-            logo = branding.get("logo")
-            logo_path = BASE_DIR / logo if logo else None
-            music_cfg = (CONFIG.get("musique", {}) or {}).get("piste_defaut")
-            music_path = BASE_DIR / music_cfg if music_cfg else None
+            update_saut(job_id, etape=f"Téléchargé ({imp.taille_mb:.1f} MB)...",
+                        progression=15)
 
             result = process_jump(
                 video_path=imp.path,
@@ -340,47 +356,40 @@ def api_import_url():
                 music_path=music_path if music_path and music_path.exists() else None,
                 output_dir=BASE_DIR / "output",
             )
-            _update_job(job_id,
-                         statut=result.statut,
-                         etape="Terminé" if result.statut == "succes" else "Erreur",
-                         progression=100,
-                         resultat=result.to_dict())
+            update_saut(job_id,
+                        statut=result.statut,
+                        etape="Terminé" if result.statut == "succes" else "Erreur",
+                        progression=100,
+                        fichier_montage=result.fichier_montage,
+                        taille_montage_mb=result.taille_montage_mb,
+                        duree_traitement_s=result.duree_traitement_s,
+                        erreurs=_json.dumps(result.erreurs) if result.erreurs else None)
         except Exception as e:
             log.exception("[%s] Import+Pipeline exception", job_id)
-            _update_job(job_id,
-                         statut="echec",
-                         etape=f"Erreur : {e}",
-                         progression=0,
-                         traceback=_tb.format_exc())
+            update_saut(job_id, statut="echec", etape=f"Erreur : {e}",
+                        progression=0, erreurs=_json.dumps([str(e)]))
 
     threading.Thread(target=run_import_and_pipeline, daemon=True).start()
+    return jsonify({"job_id": job_id, "statut": "en_cours",
+                    "message": "Téléchargement et pipeline lancés."}), 202
 
-    return jsonify({
-        "job_id": job_id,
-        "statut": "en_cours",
-        "message": "Téléchargement et pipeline lancés en arrière-plan.",
-    }), 202
 
+# ── Job status ───────────────────────────────────────────────
 
 @app.route("/api/job/<job_id>")
 def api_job_status(job_id: str):
-    """Retourne l'état d'un job en cours (lecture thread-safe)."""
-    state = _get_job(job_id)
-    if not state:
+    saut = get_saut(job_id)
+    if not saut:
         return jsonify({"erreur": "Job introuvable"}), 404
-    return jsonify({"job_id": job_id, **state})
+    return jsonify({"job_id": job_id, **saut_to_dict(saut)})
 
+
+# ── Servir les fichiers output ───────────────────────────────
 
 @app.route("/output/<filename>")
 def output_file(filename: str):
-    """Sert les montages finaux depuis output/.
-
-    Utilise le converter Flask par défaut (sans path:) pour interdire les
-    slashes et une validation supplémentaire contre path traversal.
-    """
     from flask import send_from_directory, abort
 
-    # Rejeter toute tentative de path traversal (Windows + Unix)
     if "/" in filename or "\\" in filename or ".." in filename \
             or filename.startswith("."):
         log.warning("Tentative de path traversal bloquée: %r", filename)
@@ -397,12 +406,12 @@ def output_file(filename: str):
         abort(404)
 
     return send_from_directory(BASE_DIR / "output", filename,
-                                 as_attachment=False)
+                               as_attachment=False)
 
 
 if __name__ == "__main__":
     print("=" * 60)
-    print(f"[SkyDive Pro] Serveur demo")
+    print(f"[SkyDive Pro] Serveur v2.0")
     print(f"  Ecoute       : http://{HOST}:{PORT}")
     print(f"  Dashboard    : http://{HOST}:{PORT}/")
     print(f"  Health-check : http://{HOST}:{PORT}/sante")

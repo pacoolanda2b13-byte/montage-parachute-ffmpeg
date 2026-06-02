@@ -35,6 +35,9 @@ env/
 **/*_token.json
 
 # ─── Vidéos / assets lourds ───────────────
+skydive_pro/sources/
+skydive_pro/output/
+skydive_pro/logs/
 **/sources/*.mp4
 **/sources/*.MP4
 **/sources/*.mov

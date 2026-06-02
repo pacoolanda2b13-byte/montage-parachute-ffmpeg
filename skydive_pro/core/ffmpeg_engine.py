@@ -142,7 +142,8 @@ def _pick_encoder(preferred: Optional[str] = None) -> str:
 def _cut_clip(video: str | Path, start: float, end: float,
                out_path: Path, width: int = 1920, height: int = 1080,
                fps: int = 30,
-               fade_in: float = 0.0, fade_out: float = 0.0) -> Path:
+               fade_in: float = 0.0, fade_out: float = 0.0,
+               encoder: str = "libx264") -> Path:
     """Coupe un sous-clip normalisé (résolution/fps unifiés).
 
     Args:
@@ -178,7 +179,7 @@ def _cut_clip(video: str | Path, start: float, end: float,
     if af_parts:
         cmd += ["-af", ",".join(af_parts)]
     cmd += [
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+        "-c:v", encoder, "-preset", "ultrafast", "-crf", "18",
         "-c:a", "aac", "-ar", "44100", "-ac", "2",
         str(out_path),
     ]
@@ -657,6 +658,7 @@ def build_montage(video_source: str | Path,
                    fade_duration_s: float = 0.4,
                    telemetry_chute_start_s: Optional[float] = None,
                    telemetry_atter_start_s: Optional[float] = None,
+                   pre_selected: bool = False,
                    ) -> Path:
     """Construit le montage final à partir des segments sélectionnés.
 
@@ -689,30 +691,35 @@ def build_montage(video_source: str | Path,
         except Exception as e:
             log.warning("Beat-sync indisponible (%s) — durées brutes", e)
 
-    # 1. Detecter la duree de la video source (necessaire pour la
-    # strategie positionnelle de select_best_clips)
-    _, ffprobe = _find_ffmpeg()
-    try:
-        r = subprocess.run(
-            [ffprobe, "-v", "error", "-show_entries", "format=duration",
-             "-of", "csv=p=0", str(video_source)],
-            capture_output=True, text=True, check=True,
-        )
-        video_duration_s = float(r.stdout.strip())
-    except Exception:
-        video_duration_s = None
+    if pre_selected:
+        # Multi-source : les segments sont déjà sélectionnés et ordonnés
+        # (par folder_analyzer). Pas de select_best_clips.
+        best = segments
+    else:
+        # 1. Detecter la duree de la video source (necessaire pour la
+        # strategie positionnelle de select_best_clips)
+        _, ffprobe = _find_ffmpeg()
+        try:
+            r = subprocess.run(
+                [ffprobe, "-v", "error", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(video_source)],
+                capture_output=True, text=True, check=True,
+            )
+            video_duration_s = float(r.stdout.strip())
+        except Exception:
+            video_duration_s = None
 
-    # 2. Selection POSITIONNELLE : decoupage sequentiel garanti dans
-    #    l'ordre temporel de la video source. Priorite : marqueurs
-    #    telemetrie (precis) > marqueurs Gemini (approximatifs).
-    best = select_best_clips(
-        segments,
-        max_total_duration_s=max_duration_s,
-        scene_durations=durations,
-        video_duration_s=video_duration_s,
-        telemetry_chute_start_s=telemetry_chute_start_s,
-        telemetry_atter_start_s=telemetry_atter_start_s,
-    )
+        # 2. Selection POSITIONNELLE : decoupage sequentiel garanti dans
+        #    l'ordre temporel de la video source. Priorite : marqueurs
+        #    telemetrie (precis) > marqueurs Gemini (approximatifs).
+        best = select_best_clips(
+            segments,
+            max_total_duration_s=max_duration_s,
+            scene_durations=durations,
+            video_duration_s=video_duration_s,
+            telemetry_chute_start_s=telemetry_chute_start_s,
+            telemetry_atter_start_s=telemetry_atter_start_s,
+        )
 
     # 2. Couper chaque clip + intro/stats/outro
     tmpdir = Path(tempfile.mkdtemp(prefix="montage_"))
@@ -757,9 +764,15 @@ def build_montage(video_source: str | Path,
                 fade_in = fade_duration_s if is_first_of_scene else 0.0
                 fade_out = fade_duration_s if is_last_of_scene else 0.0
             try:
-                _cut_clip(video_source, seg["start_s"], seg["end_s"], out,
+                # Multi-source : si le segment a un source_file, l'utiliser
+                # avec les timestamps locaux (relatifs au fichier source)
+                clip_source = Path(seg["source_file"]) if "source_file" in seg else video_source
+                clip_start = seg.get("local_start_s", seg["start_s"])
+                clip_end = seg.get("local_end_s", seg["end_s"])
+                _cut_clip(clip_source, clip_start, clip_end, out,
                            width, height, fps,
-                           fade_in=fade_in, fade_out=fade_out)
+                           fade_in=fade_in, fade_out=fade_out,
+                           encoder=encoder)
                 clips_files.append(out)
             except subprocess.CalledProcessError as e:
                 err = (e.stderr or b"").decode("utf-8", errors="replace")[:300]

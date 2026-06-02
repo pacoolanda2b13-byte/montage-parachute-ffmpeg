@@ -1,0 +1,1 @@
+eq=saturation=0.9:contrast=0.95:brightness=0.03,vignette=PI/4
